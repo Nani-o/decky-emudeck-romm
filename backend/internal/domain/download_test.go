@@ -57,3 +57,33 @@ func TestUpdateAvailable(t *testing.T) {
 		t.Error("touched unhashed file")
 	}
 }
+
+func TestSwitchContentSnapshotsAndDelta(t *testing.T) {
+	at := time.Unix(1000, 0).UTC()
+	base := ROMFile{ID: 10, Name: "Mario.nsp", Category: "game", SizeBytes: 100, LastModified: at, SHA1: "base"}
+	update := ROMFile{ID: 11, Name: "v2.nsp", Category: "update", SizeBytes: 20, LastModified: at, SHA1: "update"}
+	dlc := ROMFile{ID: 12, Name: "wave1.nsp", Category: "dlc", SizeBytes: 30, LastModified: at, SHA1: "dlc"}
+	manual := ROMFile{ID: 13, Name: "manual.pdf", Category: "manual", SizeBytes: 5, LastModified: at}
+	initial := []ROMFile{base, update, manual}
+	snapshot := ContentSnapshotsOf(initial)
+	if len(snapshot) != 2 || snapshot[0].Category != "" || snapshot[1].Category != "update" {
+		t.Fatalf("snapshots %+v", snapshot)
+	}
+	if !ContentUpdateAvailable(snapshot, []ROMFile{base, update, dlc, manual}) {
+		t.Fatal("new DLC wasn't detected")
+	}
+	changed, removed := ChangedContent(snapshot, []ROMFile{base, update, dlc, manual})
+	if len(changed) != 1 || changed[0].ID != dlc.ID || len(removed) != 0 {
+		t.Fatalf("delta files %+v, removed IDs %v", changed, removed)
+	}
+	changed, removed = ChangedContent(snapshot, []ROMFile{base, {ID: 14, Name: "v3.nsp", Category: "update", SizeBytes: 21, LastModified: at}})
+	if len(changed) != 1 || changed[0].ID != 14 || !removed[11] {
+		t.Fatalf("replacement delta files %+v, removed IDs %v", changed, removed)
+	}
+	if ContentUpdateAvailable(snapshot, []ROMFile{base, update, manual}) {
+		t.Fatal("manual changed the content manifest")
+	}
+	if UpdateAvailable(BaseSnapshots(snapshot), []ROMFile{base, update, dlc}) {
+		t.Fatal("base identity helper counted an added DLC")
+	}
+}

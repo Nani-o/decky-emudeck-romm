@@ -20,6 +20,12 @@ func (e Emulator) Runs(p Process) bool {
 	if e.Kind == InstallFlatpak {
 		return strings.Contains(p.Cgroup, "app-flatpak-"+e.Location+"-") || slices.Contains(p.Args, e.Location)
 	}
+	if e.ID == "eden" {
+		return slices.ContainsFunc(p.Args, func(a string) bool {
+			n := strings.ToLower(lastElem(a))
+			return n == "eden.appimage" || n == "eden" || n == "eden-qt"
+		})
+	}
 	name := path.Base(e.Location)
 	return slices.ContainsFunc(p.Args, func(a string) bool { return strings.EqualFold(lastElem(a), name) })
 }

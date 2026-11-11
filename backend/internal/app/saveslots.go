@@ -62,6 +62,9 @@ func (s *Saves) SwitchSlot(ctx context.Context, id int, slot string) error {
 	if t.slot == slot {
 		return nil
 	}
+	if t.rule.Kind == domain.SaveSwitchFolder {
+		return &domain.Error{Kind: domain.KindInvalidInput, Message: "Eden folder saves use the fixed eden slot."}
+	}
 	if s.runs(t.rule.Emulator.ID) {
 		return closeFirst(t.rule.Emulator)
 	}

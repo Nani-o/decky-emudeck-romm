@@ -27,7 +27,7 @@ func saveRoutes(s *Server, saves *app.Saves) {
 			return schema.SaveStatus{}, wireError(err)
 		}
 		out := schema.SaveStatus{
-			ID: st.ROMID, Syncs: st.Syncs, Why: st.Why, Path: st.Path, Emulator: st.Emulator, Saver: st.Saver, Slot: st.Slot, State: schema.SaveState(st.State),
+			ID: st.ROMID, Syncs: st.Syncs, Why: st.Why, WhyCode: st.WhyCode, Path: st.Path, Emulator: st.Emulator, Saver: st.Saver, Slot: st.Slot, State: schema.SaveState(st.State),
 			Problem: st.Problem, CheckedAt: rfc3339(st.CheckedAt), Syncing: st.Syncing,
 		}
 		if c := st.Conflict; c != nil {

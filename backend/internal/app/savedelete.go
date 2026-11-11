@@ -40,6 +40,10 @@ func (s *Saves) deletion(ctx context.Context, id int) (SaveDeletion, saveTarget,
 		return SaveDeletion{}, t, nil
 	}
 	out := SaveDeletion{Has: true}
+	if t.rule.Kind == domain.SaveSwitchFolder {
+		out.Why = "Eden folder saves are preserved. Remove the ROM without deleting its save."
+		return out, t, nil
+	}
 	records, err := s.records(ctx)
 	if err != nil {
 		return out, t, err

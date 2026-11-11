@@ -245,3 +245,42 @@ func TestMediaMirrorsFoldersInsideTheSystem(t *testing.T) {
 		t.Fatalf("placed %+v", placed)
 	}
 }
+
+func TestGroupedSwitchFolderMediaRetainsExtensionAndPreservesScrapedArt(t *testing.T) {
+	for _, scraped := range []bool{false, true} {
+		name := "downloaded cover"
+		if scraped {
+			name = "existing scraped cover"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := switchFixture(t)
+			f.serveSet(13, gameFile{"Example.nsp", "game", "base"}, gameFile{"update/Patch.nsp", "update", "patch"})
+			f.art.mu.Lock()
+			f.art.covers[13] = coverPNG
+			f.art.mu.Unlock()
+			correct := filepath.Join(f.mediaDir, "switch", "covers", "Example.nsp.png")
+			existing := filepath.Join(f.mediaDir, "switch", "covers", "Example.nsp.jpg")
+			if scraped {
+				writeFile(t, existing, scrapedPNG)
+			}
+			rec := f.installed(t, 13)
+			gone(t, filepath.Join(f.mediaDir, "switch", "covers", "Example.png"))
+			if scraped {
+				gone(t, correct)
+				if got := readFile(t, existing); got != string(scrapedPNG) {
+					t.Fatalf("scraped art changed: %q", got)
+				}
+				if len(rec.Media) != 0 {
+					t.Fatalf("foreign cover claimed as owned: %+v", rec.Media)
+				}
+			} else {
+				if got := readFile(t, correct); got != string(coverPNG) {
+					t.Fatalf("folder cover missing: %q", got)
+				}
+				if len(rec.Media) != 1 || rec.Media[0].Path != correct {
+					t.Fatalf("wrong folder media record: %+v", rec.Media)
+				}
+			}
+		})
+	}
+}

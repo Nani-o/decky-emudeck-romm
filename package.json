@@ -1,6 +1,6 @@
 {
   "name": "decky-emudeck-romm",
-  "version": "0.5.0",
+  "version": "0.5.0-nani.1",
   "description": "Decky Loader plugin that turns a RomM server into a library for an EmuDeck install",
   "type": "module",
   "private": true,
@@ -8,7 +8,7 @@
   "author": "chenasraf",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/chenasraf/decky-emudeck-romm.git"
+    "url": "git+https://github.com/Nani-o/decky-emudeck-romm.git"
   },
   "packageManager": "pnpm@12.14.0",
   "scripts": {

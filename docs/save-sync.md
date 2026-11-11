@@ -10,13 +10,14 @@ Saves sync for games the plugin downloaded, and for games you've linked to RomM 
 [Managing games](managing-games.md#games-you-already-have)), when they're played in one of these
 emulators:
 
-| Emulator    | Systems (EmuDeck's defaults)                    | Save                       |
-| ----------- | ----------------------------------------------- | -------------------------- |
-| RetroArch   | Most cartridge and classic systems, N64, GBA    | `.srm` battery save        |
-| melonDS     | Nintendo DS                                     | `.sav` battery save        |
-| mGBA        | Game Boy Advance, when ES-DE runs it standalone | `.sav` battery save        |
-| RMG         | Nintendo 64, when ES-DE runs it                 | N64 save files, as one zip |
-| DuckStation | PlayStation                                     | The game's memory card     |
+| Emulator    | Systems (EmuDeck's defaults)                     | Save                       |
+| ----------- | ------------------------------------------------ | -------------------------- |
+| RetroArch   | Most cartridge and classic systems, N64, GBA     | `.srm` battery save        |
+| melonDS     | Nintendo DS                                      | `.sav` battery save        |
+| mGBA        | Game Boy Advance, when ES-DE runs it standalone  | `.sav` battery save        |
+| RMG         | Nintendo 64, when ES-DE runs it                  | N64 save files, as one zip |
+| DuckStation | PlayStation                                      | The game's memory card     |
+| Eden        | Switch, with an explicit qualified title binding | Normal save folder as ZIP  |
 
 The emulator is the one ES-DE launches the game with, so changing a system's or a game's emulator in
 ES-DE changes which saves sync. Games played in other emulators, such as Dolphin, PCSX2, PPSSPP or
@@ -36,7 +37,27 @@ RetroArch keeps it in a `.rtc` file beside the `.srm`, mGBA inside its `.sav`, a
 follows the save's data, where the web player ignores it. The web player keeps no clock of its own,
 so a save from it leaves the Deck's clock running as it was.
 
+## Eden in this fork
+
+Eden requires a private `eden-saves.json` in the plugin settings directory, bound to the current
+server and device, native NAND, user profile and explicit ROM-ID/title-ID pairs. The deployment must
+qualify these identities; display names never select a save folder. This fork does not add a new
+account or title-binding screen.
+
+A mapped title's normal save directory is synchronized in the `eden` slot, as a ZIP of relative
+regular files. The archive is limited to 64 MiB and 4096 files. Save states are excluded. The ES-DE
+integration waits for pre-launch synchronization and the actual Eden process to close before
+post-game synchronization; the generic file watcher alone does not provide that folder flow.
+
+A title with no mapping and no previous synchronization history can play with local saves. A lost
+binding for a previously synchronized title, invalid profile, identity mismatch or conflict requires
+review. Restores validate the archive, retain the previous directory and an intent record, and
+refuse an automatic retry after an interrupted restore. Deleting a downloaded ROM never removes its
+Eden NAND save.
+
 ## When saves sync
+
+These regular-file triggers describe the upstream emulators; Eden uses the folder flow above.
 
 - **When you save in a game**: the save uploads a few seconds after the emulator finishes writing
   it.

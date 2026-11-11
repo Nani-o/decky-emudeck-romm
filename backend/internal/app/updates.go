@@ -68,7 +68,15 @@ func (d *Downloads) CheckUpdates(ctx context.Context, ids []int) error {
 		if err != nil {
 			return d.conn.observe(*in, err)
 		}
-		available := rec.HasUpdate(files)
+		_, platform, err := d.lookup(ctx, id)
+		if err != nil {
+			if kindOf(err) == domain.KindNotFound {
+				continue
+			}
+			return err
+		}
+		system, _ := domain.SystemForSlug(platform.Slug)
+		available := rec.HasUpdateFor(system, files)
 		if available == slices.Contains(flagged, id) {
 			continue
 		}
@@ -116,7 +124,12 @@ func (d *Downloads) IgnoreUpdate(ctx context.Context, id int) error {
 	if err != nil {
 		return d.conn.observe(*in, err)
 	}
-	if err := d.store.IgnoreUpdate(ctx, id, domain.SnapshotsOf(files)); err != nil {
+	_, platform, err := d.lookup(ctx, id)
+	if err != nil {
+		return err
+	}
+	system, _ := domain.SystemForSlug(platform.Slug)
+	if err := d.store.IgnoreUpdate(ctx, id, domain.SnapshotsBySystem(system, files)); err != nil {
 		return fmt.Errorf("record ignored update: %w", err)
 	}
 	d.log.Info("update ignored", "rom_id", id)
@@ -161,6 +174,15 @@ const newSuffix = ".romm-new"
 // ever replaced; when anything else is in the way, or a file can't be moved beside its target, the
 // old version stays as it was.
 func (d *Downloads) swap(staged []stagedFile, dir string, old []domain.PlacedFile) ([]domain.PlacedFile, error) {
+	for _, f := range old {
+		same, err := unchanged(f)
+		if err != nil {
+			return nil, err
+		}
+		if !same {
+			return nil, &domain.Error{Kind: domain.KindChangedOnDisk, Message: fmt.Sprintf("%s changed since the plugin downloaded it, so the update won't replace it.", filepath.Base(f.Path))}
+		}
+	}
 	for _, f := range staged {
 		if err := checkTarget(filepath.Join(dir, f.Rel), old); err != nil {
 			return nil, err
@@ -207,11 +229,181 @@ func (d *Downloads) swap(staged []stagedFile, dir string, old []domain.PlacedFil
 			return nil, err
 		}
 		kept[target] = true
-		placed = append(placed, domain.PlacedFile{Path: target, SizeBytes: info.Size(), ModTime: info.ModTime().UTC(), SHA1: f.SHA1})
+		placed = append(placed, domain.PlacedFile{Path: target, SizeBytes: info.Size(), ModTime: info.ModTime().UTC(), SHA1: f.SHA1, SourceFileID: f.SourceFileID})
 	}
 	gone := slices.DeleteFunc(slices.Clone(old), func(f domain.PlacedFile) bool { return kept[f.Path] })
 	d.removeFiles(gone, dir)
 	return placed, nil
+}
+
+// swapLegacyLooseRoot promotes one verified, older loose Switch file into ES-DE's matching
+// <game>.nsp/<game>.nsp folder. The backup remains beside the ROM root until ownership is saved.
+func (d *Downloads) swapLegacyLooseRoot(staged []stagedFile, dir string, old domain.PlacedFile) ([]domain.PlacedFile, string, error) {
+	root := old.Path
+	info, err := os.Lstat(root)
+	if err != nil || !info.Mode().IsRegular() {
+		if err != nil {
+			return nil, "", err
+		}
+		return nil, "", &domain.Error{Kind: domain.KindChangedOnDisk, Message: "The older Switch base path is no longer a regular file."}
+	}
+	same, err := unchanged(old)
+	if err != nil {
+		return nil, "", err
+	}
+	if !same {
+		return nil, "", &domain.Error{Kind: domain.KindChangedOnDisk, Message: "The older Switch base file changed on disk, so it wasn't moved or replaced."}
+	}
+	rels := make([]string, len(staged))
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, "", err
+	}
+	for i, f := range staged {
+		rels[i] = f.Rel
+		target, err := filepath.Abs(filepath.Join(dir, f.Rel))
+		if err != nil {
+			return nil, "", err
+		}
+		rel, err := filepath.Rel(rootAbs, target)
+		if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, "", ambiguousLegacySwitchFiles()
+		}
+	}
+	if err := validateRelativeFileTargets(rels); err != nil {
+		return nil, "", err
+	}
+	backup := filepath.Join(filepath.Dir(root), "."+filepath.Base(root)+".romm-legacy")
+	if err := checkFree(backup); err != nil {
+		return nil, "", err
+	}
+	if err := rename(root, backup); err != nil {
+		return nil, "", fmt.Errorf("keep older Switch base for rollback: %w", err)
+	}
+
+	var ready []stagedFile
+	var placed []domain.PlacedFile
+	createdRoot := false
+	rollback := func(cause error) ([]domain.PlacedFile, string, error) {
+		var rollbackErr error
+		for _, f := range ready {
+			if err := removeMatchingFile(filepath.Join(dir, f.Rel)+newSuffix, f.SHA1); rollbackErr == nil && err != nil {
+				rollbackErr = err
+			}
+		}
+		for _, f := range placed {
+			if err := removeMatchingPlacedFile(f); rollbackErr == nil && err != nil {
+				rollbackErr = err
+			}
+		}
+		if createdRoot {
+			removeEmptyDirs(root, dir)
+		}
+		if rollbackErr == nil {
+			if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+				rollbackErr = rename(backup, root)
+			} else if err == nil {
+				rollbackErr = fmt.Errorf("the original Switch path is occupied; the backup was preserved at %s", backup)
+			} else {
+				rollbackErr = err
+			}
+		}
+		if rollbackErr != nil {
+			return nil, backup, fmt.Errorf("%w; legacy file rollback failed: %v", cause, rollbackErr)
+		}
+		return nil, "", cause
+	}
+
+	if err := os.MkdirAll(filepath.Dir(root), 0o755); err != nil {
+		return rollback(err)
+	}
+	if err := os.Mkdir(root, 0o755); err != nil {
+		return rollback(err)
+	}
+	createdRoot = true
+	for _, f := range staged {
+		target := filepath.Join(dir, f.Rel)
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return rollback(err)
+		}
+		if err := checkFree(target); err != nil {
+			return rollback(err)
+		}
+		tmp := target + newSuffix
+		if err := checkFree(tmp); err != nil {
+			return rollback(err)
+		}
+		if err := moveFile(f.From, tmp); err != nil {
+			return rollback(fmt.Errorf("move into %s: %w", dir, err))
+		}
+		ready = append(ready, f)
+	}
+	for _, f := range staged {
+		target := filepath.Join(dir, f.Rel)
+		if err := checkFree(target); err != nil {
+			return rollback(err)
+		}
+		if err := rename(target+newSuffix, target); err != nil {
+			return rollback(fmt.Errorf("promote Switch file %s: %w", target, err))
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			return rollback(err)
+		}
+		placed = append(placed, domain.PlacedFile{Path: target, SizeBytes: info.Size(), ModTime: info.ModTime().UTC(), SHA1: f.SHA1, SourceFileID: f.SourceFileID})
+	}
+	return placed, backup, nil
+}
+
+func removeMatchingFile(path, sum string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("refused to remove changed file %s", path)
+	}
+	got, err := fileSHA1(path)
+	if err != nil {
+		return err
+	}
+	if got != sum {
+		return fmt.Errorf("refused to remove changed file %s", path)
+	}
+	return os.Remove(path)
+}
+
+func removeMatchingPlacedFile(f domain.PlacedFile) error {
+	same, err := unchanged(f)
+	if err != nil {
+		return err
+	}
+	if !same {
+		return fmt.Errorf("refused to remove changed file %s", f.Path)
+	}
+	if err := os.Remove(f.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func rollbackLegacyLooseRoot(backup, root string, placed []domain.PlacedFile, dir string) error {
+	for _, f := range placed {
+		if err := removeMatchingPlacedFile(f); err != nil {
+			return err
+		}
+	}
+	removeEmptyDirs(root, dir)
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return fmt.Errorf("the original Switch path is occupied; the backup was preserved at %s", backup)
+		}
+		return err
+	}
+	return rename(backup, root)
 }
 
 // SweepUpdates checks every Plugin-owned game for updates once a day, starting right away when

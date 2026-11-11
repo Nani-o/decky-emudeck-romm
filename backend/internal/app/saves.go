@@ -85,6 +85,8 @@ type SaveStatus struct {
 	// Syncs is unset when the plugin doesn't sync the game's saves; Why says why.
 	Syncs bool
 	Why   string
+	// WhyCode is set only for a machine-readable, narrowly scoped unsupported case.
+	WhyCode string
 	// Path is the save file, Emulator the tag RomM keeps it under (a RetroArch core's name, or the
 	// standalone emulator's), and Saver the name of the emulator that writes it. Slot is the RomM
 	// slot it syncs in.
@@ -150,6 +152,7 @@ type SaveGameStore interface {
 // domain.SaveRules lists, one sync at a time. RomM works out what each sync takes; the plugin
 // uploads, downloads, and never resolves a conflict on its own.
 type Saves struct {
+	eden        *EdenSaves
 	catalog     CatalogStore
 	install     *Install
 	conn        *Connection
@@ -216,7 +219,7 @@ func NewSaves(ctx context.Context, catalog CatalogStore, install *Install, conn 
 	store SaveStore, problem error, sources SaveSources, running RunningGame, backups string, onChange SaveListener, log *slog.Logger,
 ) *Saves {
 	return &Saves{
-		catalog: catalog, install: install, conn: conn, dial: dial, owned: owned, store: store, problem: problem,
+		eden: sources.Eden, catalog: catalog, install: install, conn: conn, dial: dial, owned: owned, store: store, problem: problem,
 		launchers: sources.Launchers, configs: sources.Configs, states: sources.States, n64db: sources.N64, psx: sources.PSX, duckstation: sources.DuckStation,
 		running: running, backups: backups, onChange: onChange, log: log, now: time.Now, base: ctx, reads: map[string]cachedRead{},
 		pullEvery: savePullEvery, settle: saveSettle, pollEvery: savePoll, openGap: saveOpenGap,
@@ -619,7 +622,30 @@ func (s *Saves) Sync(ctx context.Context, ids []int) (SaveSummary, error) {
 	targets = s.dropShared(ctx, targets, records)
 	server := s.dial(in.Server, in.Token)
 	var total SaveSummary
-	for batch := range slices.Chunk(targets, domain.SyncBatch) {
+	var legacy, eden []saveTarget
+	for _, t := range targets {
+		if t.rule.Kind != domain.SaveSwitchFolder {
+			legacy = append(legacy, t)
+			continue
+		}
+		if s.runs("eden") {
+			r := s.record(records, t)
+			r.State = domain.SaveWaiting
+			r.Problem = "Close Eden before syncing its save folder."
+			s.put(ctx, r)
+			total.Waiting++
+			continue
+		}
+		eden = append(eden, t)
+	}
+	var batches [][]saveTarget
+	for batch := range slices.Chunk(legacy, domain.SyncBatch) {
+		batches = append(batches, batch)
+	}
+	for batch := range slices.Chunk(eden, domain.SyncBatch) {
+		batches = append(batches, batch)
+	}
+	for _, batch := range batches {
 		p := &savePass{Saves: s, in: *in, server: server, records: records, local: map[int]localSave{}}
 		summary, err := p.run(ctx, batch)
 		total.add(summary)
@@ -715,6 +741,20 @@ func (s *Saves) Status(ctx context.Context, id int) (SaveStatus, error) {
 	}
 	if why != "" {
 		out.Why = why
+		if t.unsupportedCode != "" {
+			records, err := s.records(ctx)
+			if err != nil {
+				return out, err
+			}
+			if r, ok := records[id]; ok {
+				// A previously synced save must not become launch-only merely because its
+				// explicit Eden title mapping was removed. Keep its last known state visible
+				// and leave WhyCode empty so the launch bridge still requires review.
+				out.State, out.Problem, out.CheckedAt = r.State, r.Problem, r.CheckedAt
+			} else {
+				out.WhyCode = t.unsupportedCode
+			}
+		}
 		return out, nil
 	}
 	out.Syncs, out.Path, out.Emulator, out.Saver, out.Slot = true, t.path, t.emulator, t.rule.Emulator.Name, t.slot
@@ -826,6 +866,9 @@ func (p *savePass) complete(ctx context.Context, session int) {
 // plan reads the saves of targets and asks RomM what syncing them takes.
 func (p *savePass) plan(ctx context.Context, targets []saveTarget) (domain.SyncPlan, error) {
 	req := domain.SyncRequest{DeviceID: p.in.DeviceID, RestoreUnlisted: true}
+	if len(targets) > 0 && targets[0].rule.Kind == domain.SaveSwitchFolder {
+		req.Emulators = []string{"eden"}
+	}
 	for _, t := range targets {
 		req.ROMIDs = append(req.ROMIDs, t.romID)
 		local, err := t.format.read()
@@ -920,6 +963,18 @@ func clearConflict(r *domain.SaveRecord) {
 // upload adds the Deck's save to its slot, op being what RomM planned for it. With overwrite it does
 // so even when the slot moved on since this Deck last synced: the user chose the Deck's copy.
 func (p *savePass) upload(ctx context.Context, t saveTarget, local localSave, op domain.SyncOperation, session int, overwrite bool, r *domain.SaveRecord) error {
+	if t.rule.Kind == domain.SaveSwitchFolder {
+		if p.runs("eden") {
+			return closeFirst(t.rule.Emulator)
+		}
+		now, err := t.format.read()
+		if err != nil {
+			return err
+		}
+		if !now.exists || now.hash != local.hash {
+			return errors.New("Eden save changed before upload")
+		}
+	}
 	if !local.exists {
 		return errors.New("the save to upload is gone")
 	}
@@ -947,6 +1002,9 @@ func (p *savePass) upload(ctx context.Context, t saveTarget, local localSave, op
 }
 
 func (p *savePass) download(ctx context.Context, t saveTarget, op domain.SyncOperation, local localSave, session int, r *domain.SaveRecord) error {
+	if t.rule.Kind == domain.SaveSwitchFolder && op.Emulator != "eden" {
+		return errors.New("RomM save is not an Eden folder archive")
+	}
 	// An N64 save is checked as it's read: any N64 emulator's unit, files or .srm will do.
 	if t.rule.Kind == domain.SaveRawFile && !domain.RawBatterySave(op.Emulator) {
 		return fmt.Errorf("RomM's newest save is from %s, which %s can't load", op.Emulator, t.rule.Emulator.Name)

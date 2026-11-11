@@ -31,7 +31,7 @@ func (s System) ArchivePolicy() ArchivePolicy {
 // IsArchive says whether a file name is an archive the plugin can extract.
 func IsArchive(name string) bool {
 	switch strings.ToLower(filepath.Ext(name)) {
-	case ".zip", ".7z":
+	case ".zip", ".7z", ".rar":
 		return true
 	}
 	return false

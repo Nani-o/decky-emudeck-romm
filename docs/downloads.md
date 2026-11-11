@@ -18,8 +18,9 @@ While you're signed out of RomM, downloads wait until you sign in again.
 ## Where games go
 
 Each RomM platform maps to its EmuDeck folder, such as `roms/snes` or `roms/psx`. A game downloads
-into a staging folder on the same drive first and moves into place in one step, so ES-DE never sees
-a half-written game.
+into a staging folder first. The plugin completes transfers and extraction, validates target
+collisions, then publishes the files. Publication and the ownership database are separate steps;
+this does not promise an atomic whole-game rollback after a process or disk failure.
 
 The plugin never overwrites a file it didn't download. If something is already where a game would
 go, the download stops and says so, and the game shows as **On Deck (not managed)**.
@@ -43,6 +44,9 @@ How a zip or 7z download is handled depends on the system:
 - **Disc and modern systems** (PlayStation, Dreamcast, GameCube, Wii, Switch, 3DS and others) are
   always extracted.
 
+Switch also supports RAR archives and the qualified multipart base-game sets. Missing volumes,
+encryption, unsafe paths and colliding output files are refused before publication.
+
 ## Games made of several files
 
 A game RomM keeps as several files, such as a multi-disc game, is laid out the way its emulator and
@@ -51,7 +55,12 @@ ES-DE expect:
 - **Disc-based and classic computer systems** get a `<Game>.m3u` folder holding the discs and a
   playlist the plugin writes. ES-DE shows the folder as one game, and the emulator swaps discs from
   the playlist.
-- **PlayStation 3** games go in a `<Game>.ps3` folder.
+- **PlayStation 3** disc layouts go in a `<Game>.ps3` folder. A PSN PKG still requires native RPCS3
+  installation; downloading or extracting the package does not make it a bootable game.
+- **Switch** keeps the base game, updates and DLC under one title entry. A single raw base uses a
+  layout such as `Game.nsp/Game.nsp`, which ES-DE interprets as one game. Extras are kept under
+  `update/` and `dlc/`, with owned `noload.txt` markers to exclude them from the ES-DE game list.
+  Eden needs its native recursive game-directory scan and external-content option enabled.
 - **Wii U** games go in a `<Game>` folder, as Cemu reads them.
 - **DOS** games are zipped into `<Game>.zip`, which DOSBox Pure mounts as a drive.
 
@@ -71,7 +80,9 @@ does:
 If RomM can't convert the file, it downloads as stored, and the game's page shows **⚠ Not ready to
 play** with what's left to do, such as installing a `.cia` in Azahar.
 
-Only the game itself downloads; manuals and other extras RomM keeps alongside it don't.
+Switch downloads include files RomM categorizes as `game`, `update` and `dlc`. Other systems retain
+the upstream base-game policy. Manuals, soundtracks and unrelated categories are not downloaded.
+Files outside a title's indexed manifest cannot be fetched as its extras.
 
 ## Disk space
 

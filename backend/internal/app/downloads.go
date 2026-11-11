@@ -366,7 +366,12 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 		return j.Download, nil
 	}
 	need := roomFor(system, rom)
-	if j != nil {
+	if update && system.Folder == "switch" {
+		// The exact Switch delta comes from the server's file manifest and is checked when this job
+		// starts. RomM's catalog size covers the base game, which may already occupy several GB.
+		need = 0
+	}
+	if j != nil && !(update && system.Folder == "switch") {
 		// A retry resumes, so only what's left of it needs room.
 		need += j.Total - j.Received - rom.SizeBytes
 	}
@@ -379,6 +384,10 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 	d.mu.Lock()
 	j = d.find(id)
 	added := j == nil
+	totalBytes := rom.SizeBytes
+	if update && system.Folder == "switch" {
+		totalBytes = 0 // the actual delta is known only after reading the file manifest
+	}
 	switch {
 	case j != nil && j.State != domain.StateFailed:
 		d.mu.Unlock()
@@ -389,7 +398,7 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 	default:
 		j = &job{
 			ROMID: id, PlatformID: rom.PlatformID, PlatformName: platform.Name, Name: rom.Name,
-			State: domain.StateQueued, Total: rom.SizeBytes, update: update}
+			State: domain.StateQueued, Total: totalBytes, update: update}
 		d.jobs = append(d.jobs, j)
 		d.log.Info("download queued", "rom_id", id, "name", rom.Name, "update", update)
 	}
@@ -414,6 +423,153 @@ func roomFor(system domain.System, rom domain.ROM) int64 {
 		need += rom.SizeBytes
 	}
 	return need
+}
+
+func conversionFor(system domain.System, layout domain.Layout, singleFile bool) (domain.Conversion, bool) {
+	if !singleFile || len(layout.Files) != 1 {
+		return domain.Conversion{}, false
+	}
+	return system.ConversionFor(layout.Files[0].File.Name)
+}
+
+func legacySwitchBaseCohort(rec domain.OwnedROM) ([]domain.PlacedFile, bool, error) {
+	var legacy []domain.PlacedFile
+	for _, f := range rec.Files {
+		if f.SourceFileID == 0 {
+			legacy = append(legacy, f)
+		}
+	}
+	if len(legacy) == 0 {
+		return nil, false, nil
+	}
+	base := domain.BaseSnapshots(rec.Snapshot)
+	if len(rec.Snapshot) > 0 && len(base) == len(rec.Snapshot) {
+		return legacy, true, nil
+	}
+	if len(base) > 0 {
+		for _, snapshot := range rec.Snapshot {
+			category := strings.ToLower(strings.TrimSpace(snapshot.Category))
+			if category == "" || category == "game" {
+				continue
+			}
+			if category != "update" && category != "dlc" || snapshot.FileID <= 0 || !slices.ContainsFunc(rec.Files, func(f domain.PlacedFile) bool {
+				return f.SourceFileID > 0 && f.SourceFileID == snapshot.FileID
+			}) {
+				return nil, false, ambiguousLegacySwitchFiles()
+			}
+		}
+		return legacy, true, nil
+	}
+	return nil, false, ambiguousLegacySwitchFiles()
+}
+
+func ambiguousLegacySwitchFiles() error {
+	return &domain.Error{Kind: domain.KindChangedOnDisk, Message: "The plugin can't safely identify this older Switch install's base files. Its files were left untouched."}
+}
+
+func legacyLooseSwitchBase(dir, root string, baseFiles []domain.ROMFile, cohort []domain.PlacedFile, baseChanged bool) (*domain.PlacedFile, error) {
+	rootPath := filepath.Join(dir, root)
+	var match *domain.PlacedFile
+	for i := range cohort {
+		if cohort[i].Path == rootPath {
+			if match != nil {
+				return nil, ambiguousLegacySwitchFiles()
+			}
+			match = &cohort[i]
+		}
+	}
+	if match == nil {
+		return nil, nil
+	}
+	if len(cohort) != 1 || len(baseFiles) != 1 || !domain.IsSwitchLaunchFile(filepath.Base(rootPath)) {
+		return nil, ambiguousLegacySwitchFiles()
+	}
+	info, err := os.Lstat(rootPath)
+	if errors.Is(err, os.ErrNotExist) {
+		if baseChanged {
+			return nil, nil
+		}
+		return nil, &domain.Error{Kind: domain.KindChangedOnDisk, Message: "The older Switch base file is missing, so its content can't be moved safely. It was not downloaded again."}
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, &domain.Error{Kind: domain.KindChangedOnDisk, Message: "The older Switch base path is no longer a regular file. Its contents were left untouched."}
+	}
+	if !baseChanged {
+		same, err := unchanged(*match)
+		if err != nil {
+			return nil, err
+		}
+		if !same {
+			return nil, &domain.Error{Kind: domain.KindChangedOnDisk, Message: "The older Switch base file changed on disk, so it wasn't moved or replaced."}
+		}
+	}
+	copy := *match
+	return &copy, nil
+}
+
+func stageLegacySwitchBase(staging string, base domain.PlacedFile, root string) (stagedFile, error) {
+	same, err := unchanged(base)
+	if err != nil {
+		return stagedFile{}, err
+	}
+	if !same {
+		return stagedFile{}, &domain.Error{Kind: domain.KindChangedOnDisk, Message: "The older Switch base file changed on disk, so it wasn't moved or replaced."}
+	}
+	info, err := os.Lstat(base.Path)
+	if err != nil || !info.Mode().IsRegular() {
+		if err != nil {
+			return stagedFile{}, err
+		}
+		return stagedFile{}, &domain.Error{Kind: domain.KindChangedOnDisk, Message: "The older Switch base path is no longer a regular file."}
+	}
+	name := filepath.Base(root)
+	if !domain.IsSwitchLaunchFile(name) {
+		return stagedFile{}, ambiguousLegacySwitchFiles()
+	}
+	path := filepath.Join(staging, "switch-legacy-base", name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return stagedFile{}, err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return stagedFile{}, err
+	}
+	if err := copyFile(base.Path, path); err != nil {
+		return stagedFile{}, fmt.Errorf("stage older Switch base: %w", err)
+	}
+	sum, err := fileSHA1(path)
+	if err != nil {
+		_ = os.Remove(path)
+		return stagedFile{}, err
+	}
+	if sum != base.SHA1 {
+		_ = os.Remove(path)
+		return stagedFile{}, &domain.Error{Kind: domain.KindChangedOnDisk, Message: "The older Switch base file changed while it was being moved."}
+	}
+	return stagedFile{From: path, Rel: filepath.Join(root, name), SHA1: sum}, nil
+}
+
+func switchRootFromOwned(dir string, rec domain.OwnedROM) string {
+	baseIDs := map[int]bool{}
+	for _, s := range domain.BaseSnapshots(rec.Snapshot) {
+		baseIDs[s.FileID] = true
+	}
+	for _, f := range rec.Files {
+		if f.SourceFileID != 0 && !baseIDs[f.SourceFileID] {
+			continue
+		}
+		rel, err := filepath.Rel(dir, f.Path)
+		if err != nil || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			continue
+		}
+		root := strings.Split(filepath.ToSlash(rel), "/")[0]
+		if root != "" && root != "." {
+			return filepath.FromSlash(root)
+		}
+	}
+	return ""
 }
 
 // Cancel stops a game's download, takes it out of the queue, or dismisses its failure, deleting
@@ -644,6 +800,7 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	}
 	// An update replaces the files the plugin placed, in the folder they're in.
 	var old, oldMedia []domain.PlacedFile
+	var oldRecord domain.OwnedROM
 	if j.update {
 		rec, ok, err := d.store.Owned(ctx, j.ROMID)
 		if err != nil {
@@ -652,6 +809,7 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 		if !ok {
 			return &domain.Error{Kind: domain.KindInvalidInput, Message: "The plugin no longer manages that game, so it can't update it."}
 		}
+		oldRecord = rec
 		old, oldMedia = rec.Files, rec.Media
 		if len(old) > 0 {
 			if held := d.dirHolding(ctx, rom.PlatformID, old[0].Path); held != "" {
@@ -665,16 +823,134 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 		return d.conn.observe(*in, err)
 	}
 	game := domain.GameFiles(files)
+	manifest := game
+	if system.Folder == "switch" {
+		manifest = domain.ContentFiles(files)
+	}
 	name := rom.FileName
 	if name == "" {
 		name = rom.Name
 	}
-	layout, err := domain.PlanLayout(system, name, game)
+	firstRAR := -1
+	if system.Folder == "switch" {
+		firstRAR, err = multipartRAR(game)
+		if err != nil {
+			return err
+		}
+	}
+	layout, err := domain.PlanLayout(system, name, manifest)
 	if err != nil {
 		return err
 	}
-	whole := len(layout.Files) == 1 && !layout.Zip
-	_, convertible := system.ConversionFor(layout.Root)
+	if j.update && system.Folder == "switch" {
+		if root := switchRootFromOwned(dir, oldRecord); root != "" && root != layout.Root {
+			oldRoot := layout.Root
+			for i := range layout.Files {
+				if rel, err := filepath.Rel(oldRoot, layout.Files[i].Rel); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					layout.Files[i].Rel = filepath.Join(root, rel)
+				}
+			}
+			base := domain.GameFiles(manifest)
+			if len(base) == 1 && domain.IsSwitchLaunchFile(base[0].Name) && filepath.Base(base[0].Name) == base[0].Name && domain.IsSwitchLaunchFile(filepath.Base(root)) {
+				oldExt, newExt := filepath.Ext(root), filepath.Ext(base[0].Name)
+				if !strings.EqualFold(oldExt, newExt) {
+					return &domain.Error{Kind: domain.KindCantDownload, Message: "The Switch base file extension changed, so the existing ES-DE entry can't be updated safely. Remove and download the game again."}
+				}
+				for i := range layout.Files {
+					if layout.Files[i].File.ID == base[0].ID {
+						layout.Files[i].Rel = filepath.Join(root, filepath.Base(root))
+					}
+				}
+			}
+			layout.Root = root
+		}
+	}
+	downloadFiles := manifest
+	var replaceOld, keepOld []domain.PlacedFile
+	var legacyBase []domain.PlacedFile
+	var legacyLoose *domain.PlacedFile
+	var hasLegacyBase bool
+	baseChanged := false
+	if j.update && system.Folder == "switch" {
+		legacyBase, hasLegacyBase, err = legacySwitchBaseCohort(oldRecord)
+		if err != nil {
+			return err
+		}
+		baseChanged = domain.UpdateAvailable(domain.BaseSnapshots(oldRecord.Snapshot), files)
+		if hasLegacyBase {
+			legacyLoose, err = legacyLooseSwitchBase(dir, layout.Root, game, legacyBase, baseChanged)
+			if err != nil {
+				return err
+			}
+		}
+		downloadFiles, touchedIDs := domain.ChangedContent(oldRecord.Snapshot, manifest)
+		if hasLegacyBase && baseChanged {
+			selectedBase := map[int]bool{}
+			for _, f := range downloadFiles {
+				if f.IsGame() {
+					selectedBase[f.ID] = true
+				}
+			}
+			for _, f := range game {
+				if !selectedBase[f.ID] {
+					downloadFiles = append(downloadFiles, f)
+				}
+			}
+			for _, snapshot := range domain.BaseSnapshots(oldRecord.Snapshot) {
+				touchedIDs[snapshot.FileID] = true
+			}
+		}
+		if firstRAR >= 0 {
+			selected := false
+			for _, f := range downloadFiles {
+				selected = selected || slices.ContainsFunc(game, func(g domain.ROMFile) bool { return g.ID == f.ID })
+			}
+			if selected {
+				for _, f := range game {
+					if !slices.ContainsFunc(downloadFiles, func(selected domain.ROMFile) bool { return selected.ID == f.ID }) {
+						downloadFiles = append(downloadFiles, f)
+					}
+				}
+				for _, f := range game {
+					touchedIDs[f.ID] = true
+				}
+			}
+		}
+		selected := make(map[int]bool, len(downloadFiles))
+		for _, f := range downloadFiles {
+			selected[f.ID] = true
+		}
+		layout.Files = slices.DeleteFunc(layout.Files, func(f domain.PlannedFile) bool { return !selected[f.File.ID] })
+		legacyPaths := map[string]bool{}
+		for _, f := range legacyBase {
+			legacyPaths[f.Path] = true
+		}
+		for _, f := range old {
+			if f.SourceFileID < 0 {
+				if _, err := os.Lstat(f.Path); errors.Is(err, os.ErrNotExist) {
+					continue
+				} else if err != nil {
+					return err
+				}
+				keepOld = append(keepOld, f)
+				continue
+			}
+			legacyBaseTouched := f.SourceFileID == 0 && legacyPaths[f.Path] && (baseChanged || legacyLoose != nil && f.Path == legacyLoose.Path)
+			if legacyBaseTouched || f.SourceFileID != 0 && touchedIDs[f.SourceFileID] {
+				replaceOld = append(replaceOld, f)
+			} else {
+				keepOld = append(keepOld, f)
+			}
+		}
+	} else if j.update {
+		replaceOld = old
+	}
+	whole := len(layout.Files) == 1 && !layout.Zip && system.Folder != "switch"
+	singleFile := len(layout.Files) == 1 && !layout.Zip
+	convertible := false
+	if singleFile {
+		_, convertible = system.ConversionFor(layout.Files[0].File.Name)
+	}
 	if !whole || (!domain.IsArchive(layout.Root) || system.ArchivePolicy() == domain.ArchivesKeep) && !convertible {
 		// The game's entry in the ROM folder is known before it downloads, so one already there
 		// fails it now rather than after the download. A file the Server may convert is checked
@@ -685,7 +961,7 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	}
 
 	staging := d.staging(j.ROMID)
-	snapshot := domain.SnapshotOfSet(game)
+	snapshot := domain.SnapshotOfSet(downloadFiles)
 	d.mu.Lock()
 	same := samePartial(j.partial, snapshot)
 	j.partial = snapshot
@@ -703,7 +979,7 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	// as the Server keeps it, which the conversion is asked for by name.
 	var conversion *domain.Conversion
 	var stored domain.ROMFile
-	if c, ok := system.ConversionFor(layout.Root); ok && whole {
+	if c, ok := conversionFor(system, layout, singleFile); ok {
 		stored = layout.Files[0].File
 		served, ok, err := d.convert(ctx, server, j, stored, c)
 		if err != nil {
@@ -712,7 +988,22 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 		if ok {
 			conversion = &c
 			file := domain.ROMFile{ID: stored.ID, Name: served.Name, Path: served.Name, SizeBytes: served.Size}
-			layout = domain.Layout{Root: served.Name, Files: []domain.PlannedFile{{File: file, Rel: served.Name}}}
+			if system.Folder == "switch" {
+				if !j.update && stored.IsGame() && filepath.Base(served.Name) == served.Name {
+					oldRoot := layout.Root
+					newRoot := served.Name
+					for i := range layout.Files {
+						if rel, err := filepath.Rel(oldRoot, layout.Files[i].Rel); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+							layout.Files[i].Rel = filepath.Join(newRoot, rel)
+						}
+					}
+					layout.Root = newRoot
+				}
+				layout.Files[0].File = file
+				layout.Files[0].Rel = filepath.Join(filepath.Dir(layout.Files[0].Rel), served.Name)
+			} else {
+				layout = domain.Layout{Root: served.Name, Files: []domain.PlannedFile{{File: file, Rel: served.Name}}}
+			}
 			if err := checkTarget(filepath.Join(dir, layout.Root), old); err != nil {
 				return err
 			}
@@ -722,6 +1013,11 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	var total int64
 	for _, f := range layout.Files {
 		total += f.File.SizeBytes
+	}
+	if system.Folder == "switch" {
+		if err := d.checkSpace(total, d.pendingExcept(j.ROMID), dir); err != nil {
+			return err
+		}
 	}
 	d.mu.Lock()
 	j.State, j.Total = domain.StateDownloading, total
@@ -735,6 +1031,13 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	var done int64
 	for i, f := range layout.Files {
 		path := filepath.Join(staging, filepath.FromSlash(f.File.Path))
+		if system.Folder == "switch" {
+			category := f.File.Category
+			if category == "" {
+				category = "game"
+			}
+			path = filepath.Join(staging, "switch-content", category, filepath.FromSlash(f.File.Path))
+		}
 		get := func(from int64, open func(int64) (io.Writer, error)) error {
 			return server.DownloadFile(ctx, f.File.ID, f.File.Name, from, open)
 		}
@@ -755,41 +1058,68 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	}
 
 	var staged []stagedFile
-	switch {
-	case layout.Zip:
-		if err = d.waitForGame(ctx, j); err == nil {
-			staged, err = zipGame(layout, paths, staging, dir, d.checkSpace)
+	if system.Folder == "switch" {
+		legacyLoosePath := ""
+		if legacyLoose != nil {
+			legacyLoosePath = legacyLoose.Path
 		}
-	case whole:
-		staged, err = d.unpack(ctx, j, system, paths[0], sums[0], dir)
-	default:
-		staged, err = stageSet(layout, paths, staging, sums)
+		staged, err = d.stageSwitchContent(ctx, j, system, layout, paths, sums, staging, dir, manifest, game, firstRAR, old, legacyLoosePath)
+	} else {
+		switch {
+		case layout.Zip:
+			if err = d.waitForGame(ctx, j); err == nil {
+				staged, err = zipGame(layout, paths, staging, dir, d.checkSpace)
+			}
+		case whole:
+			staged, err = d.unpack(ctx, j, system, paths[0], sums[0], dir, layout.Files[0].File.ID)
+		default:
+			staged, err = stageSet(layout, paths, staging, sums)
+		}
 	}
 	if err != nil {
 		return err
 	}
+	if legacyLoose != nil && !baseChanged {
+		base, err := stageLegacySwitchBase(staging, *legacyLoose, layout.Root)
+		if err != nil {
+			return err
+		}
+		staged = append(staged, base)
+		rels := make([]string, len(staged))
+		for i, f := range staged {
+			rels[i] = f.Rel
+		}
+		if err := validateRelativeFileTargets(rels); err != nil {
+			return err
+		}
+	}
 	place := d.place
 	var carry func(context.Context)
 	if j.update {
-		place = func(staged []stagedFile, dir string) ([]domain.PlacedFile, error) { return d.swap(staged, dir, old) }
+		place = func(staged []stagedFile, dir string) ([]domain.PlacedFile, error) {
+			return d.swap(staged, dir, replaceOld)
+		}
 		// The save is found from the old files, so it syncs and is looked for before they go.
 		if d.saves != nil {
 			carry = d.saves.carryOver(ctx, j.ROMID)
 		}
 	}
-	placed, err := place(staged, dir)
+	var placed []domain.PlacedFile
+	legacyBackup := ""
+	if j.update && system.Folder == "switch" && legacyLoose != nil {
+		if len(replaceOld) != 1 || replaceOld[0].Path != legacyLoose.Path {
+			return ambiguousLegacySwitchFiles()
+		}
+		placed, legacyBackup, err = d.swapLegacyLooseRoot(staged, dir, replaceOld[0])
+	} else {
+		placed, err = place(staged, dir)
+	}
 	if err != nil {
 		return err
 	}
 	// The snapshot is of the files as the Server keeps them, which later checks for updates
 	// compare against, even when the plugin placed a converted copy.
-	snapshots := make([]domain.FileSnapshot, 0, len(game))
-	for _, f := range layout.Files {
-		if conversion != nil {
-			f.File = stored
-		}
-		snapshots = append(snapshots, domain.SnapshotOf(f.File))
-	}
+	snapshots := domain.SnapshotsBySystem(system, files)
 	// The files are in place, so the rest runs even if the download is cancelled now. An update's
 	// art goes the way of its old files, then comes again from RomM, except where something replaced
 	// it.
@@ -799,7 +1129,7 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	owned := domain.OwnedROM{
 		ROMID:       j.ROMID,
 		PlatformID:  rom.PlatformID,
-		Files:       placed,
+		Files:       append(keepOld, placed...),
 		Snapshot:    snapshots,
 		InstalledAt: d.now().UTC(),
 		Media:       media,
@@ -807,9 +1137,20 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	if err := d.store.SaveOwned(ctx, owned); err != nil {
 		// Without a record the files would be User-managed, and the plugin could never update or
 		// delete them. They are the plugin's own download, so they go.
-		d.removeFiles(placed, dir)
+		if legacyBackup != "" {
+			if restoreErr := rollbackLegacyLooseRoot(legacyBackup, filepath.Join(dir, layout.Root), placed, dir); restoreErr != nil {
+				d.log.Error("restore older Switch file after failed ownership write", "path", legacyBackup, "err", restoreErr)
+			}
+		} else {
+			d.removeFiles(placed, dir)
+		}
 		d.removeMedia(media)
 		return fmt.Errorf("record download: %w", err)
+	}
+	if legacyBackup != "" {
+		if err := os.Remove(legacyBackup); err != nil && !errors.Is(err, os.ErrNotExist) {
+			d.log.Error("remove older Switch file backup", "path", legacyBackup, "err", err)
+		}
 	}
 	if carry != nil {
 		carry(ctx)
@@ -889,7 +1230,7 @@ const madeDir = ".made"
 func stageSet(layout domain.Layout, paths []string, staging string, sums []string) ([]stagedFile, error) {
 	out := make([]stagedFile, 0, len(layout.Files)+1)
 	for i, f := range layout.Files {
-		out = append(out, stagedFile{From: paths[i], Rel: f.Rel, SHA1: sums[i]})
+		out = append(out, stagedFile{From: paths[i], Rel: f.Rel, SHA1: sums[i], SourceFileID: f.File.ID})
 	}
 	if layout.Playlist == nil {
 		return out, nil
@@ -904,6 +1245,163 @@ func stageSet(layout domain.Layout, paths []string, staging string, sums []strin
 	}
 	sum := sha1.Sum(content) //nolint:gosec // see import
 	return append(out, stagedFile{From: path, Rel: layout.Playlist.Rel, SHA1: hex.EncodeToString(sum[:])}), nil
+}
+
+func (d *Downloads) stageSwitchContent(ctx context.Context, j *job, system domain.System, layout domain.Layout, paths, sums []string, staging, dir string, manifest, game []domain.ROMFile, firstRAR int, old []domain.PlacedFile, legacyLoosePath string) ([]stagedFile, error) {
+	index := make(map[int]int, len(layout.Files))
+	for i, f := range layout.Files {
+		index[f.File.ID] = i
+	}
+	rarIDs := map[int]bool{}
+	rarFirstID := 0
+	if firstRAR >= 0 && firstRAR < len(game) {
+		rarFirstID = game[firstRAR].ID
+		for _, f := range game {
+			rarIDs[f.ID] = true
+		}
+	}
+	var out []stagedFile
+	for i, f := range layout.Files {
+		if rarIDs[f.File.ID] {
+			if f.File.ID != rarFirstID {
+				continue
+			}
+			volumes := make([]string, 0, len(rarIDs))
+			for _, volume := range game {
+				if volumeIndex, ok := index[volume.ID]; ok {
+					volumes = append(volumes, paths[volumeIndex])
+				}
+			}
+			items, err := d.unpack(ctx, j, system, paths[i], sums[i], dir, f.File.ID, volumes...)
+			if err != nil {
+				return nil, err
+			}
+			prefix := filepath.Dir(f.Rel)
+			if err := validateSwitchLaunchFiles(items, prefix); err != nil {
+				return nil, err
+			}
+			out = appendSwitchFiles(out, items, prefix, f.File.ID)
+			continue
+		}
+		if domain.IsArchive(f.File.Name) {
+			items, err := d.unpack(ctx, j, system, paths[i], sums[i], dir, f.File.ID)
+			if err != nil {
+				return nil, err
+			}
+			prefix := filepath.Dir(f.Rel)
+			if f.File.IsGame() {
+				if err := validateSwitchLaunchFiles(items, prefix); err != nil {
+					return nil, err
+				}
+			}
+			out = appendSwitchFiles(out, items, prefix, f.File.ID)
+			continue
+		}
+		out = append(out, stagedFile{From: paths[i], Rel: f.Rel, SHA1: sums[i], SourceFileID: f.File.ID})
+	}
+	markers, err := switchCategoryMarkers(staging, dir, layout.Root, manifest, old, legacyLoosePath)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, markers...)
+	rels := make([]string, len(out))
+	for i, f := range out {
+		rels[i] = f.Rel
+	}
+	if err := validateRelativeFileTargets(rels); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+const (
+	switchUpdateMarkerID = -1
+	switchDLCMarkerID    = -2
+)
+
+func switchCategoryMarkers(staging, dir, root string, manifest []domain.ROMFile, old []domain.PlacedFile, legacyLoosePath string) ([]stagedFile, error) {
+	categories := map[string]int{}
+	for _, f := range manifest {
+		switch strings.ToLower(strings.TrimSpace(f.Category)) {
+		case "update":
+			categories["update"] = switchUpdateMarkerID
+		case "dlc":
+			categories["dlc"] = switchDLCMarkerID
+		}
+	}
+	var out []stagedFile
+	for category, sourceID := range categories {
+		rel := filepath.Join(root, category, "noload.txt")
+		target := filepath.Join(dir, rel)
+		known := false
+		for _, f := range old {
+			if f.Path != target || f.SourceFileID != sourceID {
+				continue
+			}
+			if _, err := os.Lstat(target); errors.Is(err, os.ErrNotExist) {
+				break
+			} else if err != nil {
+				return nil, err
+			}
+			known = true
+			unchanged, err := unchanged(f)
+			if err != nil {
+				return nil, err
+			}
+			if unchanged {
+				break
+			}
+			return nil, checkFree(target)
+		}
+		if known {
+			continue
+		}
+		if err := checkFreeForLegacyLoosePromotion(target, legacyLoosePath); err != nil {
+			return nil, err
+		}
+		path := filepath.Join(staging, "switch-markers", category, "noload.txt")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(path, nil, 0o644); err != nil {
+			return nil, err
+		}
+		sum := sha1.Sum(nil) //nolint:gosec // records the owned empty ES-DE marker
+		out = append(out, stagedFile{From: path, Rel: rel, SHA1: hex.EncodeToString(sum[:]), SourceFileID: sourceID})
+	}
+	return out, nil
+}
+
+func checkFreeForLegacyLoosePromotion(path, looseFile string) error {
+	err := checkFree(path)
+	if err == nil || looseFile == "" || !errors.Is(err, syscall.ENOTDIR) {
+		return err
+	}
+	rel, relErr := filepath.Rel(looseFile, path)
+	if relErr == nil && rel != "." && rel != ".." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	return err
+}
+
+func validateSwitchLaunchFiles(items []stagedFile, prefix string) error {
+	for _, item := range items {
+		if domain.IsSwitchLaunchFile(item.Rel) && !domain.SafeESDELaunchPath(filepath.Join(prefix, item.Rel)) {
+			return &domain.Error{Kind: domain.KindCantDownload, Message: "A Switch archive contains a game path that ES-DE can't safely launch."}
+		}
+	}
+	return nil
+}
+
+func appendSwitchFiles(out, items []stagedFile, prefix string, sourceFileID int) []stagedFile {
+	for _, item := range items {
+		if prefix != "." && prefix != "" {
+			item.Rel = filepath.Join(prefix, item.Rel)
+		}
+		item.SourceFileID = sourceFileID
+		out = append(out, item)
+	}
+	return out
 }
 
 // zipGame zips the downloaded files of a game, at paths, into one archive in staging, checking
@@ -968,18 +1466,19 @@ func writeZip(path string, layout domain.Layout, paths []string) (string, error)
 type stagedFile struct {
 	From string
 	// Rel is where it goes under the ROM folder.
-	Rel  string
-	SHA1 string
+	Rel          string
+	SHA1         string
+	SourceFileID int
 }
 
 // unpack decides whether the downloaded file at path is placed as it is or extracted into dir,
 // and returns what to place: the file itself, or the archive's contents.
-func (d *Downloads) unpack(ctx context.Context, j *job, system domain.System, path, sum, dir string) ([]stagedFile, error) {
-	whole := []stagedFile{{From: path, Rel: filepath.Base(path), SHA1: sum}}
+func (d *Downloads) unpack(ctx context.Context, j *job, system domain.System, path, sum, dir string, sourceFileID int, rarVolumes ...string) ([]stagedFile, error) {
+	whole := []stagedFile{{From: path, Rel: filepath.Base(path), SHA1: sum, SourceFileID: sourceFileID}}
 	if !domain.IsArchive(path) || system.ArchivePolicy() == domain.ArchivesKeep {
 		return whole, nil
 	}
-	members, closeArchive, err := openArchive(path)
+	members, closeArchive, err := openArchive(path, rarVolumes...)
 	if err != nil {
 		return nil, err
 	}
@@ -987,7 +1486,7 @@ func (d *Downloads) unpack(ctx context.Context, j *job, system domain.System, pa
 	if len(members) == 0 {
 		return nil, &domain.Error{Kind: domain.KindCantDownload, Message: "The archive from RomM is empty."}
 	}
-	if !system.Extracts(len(members), d.prefs.KeepArchives(system.Folder)) {
+	if !strings.EqualFold(filepath.Ext(path), ".rar") && !system.Extracts(len(members), d.prefs.KeepArchives(system.Folder)) {
 		return whole, nil
 	}
 	if err := d.waitForGame(ctx, j); err != nil {
@@ -1001,7 +1500,7 @@ func (d *Downloads) unpack(ctx context.Context, j *job, system domain.System, pa
 	if err := d.checkSpace(size, 0, dir); err != nil {
 		return nil, err
 	}
-	dest := filepath.Join(filepath.Dir(path), extractedDir)
+	dest := filepath.Join(filepath.Dir(path), extractedDir, strconv.Itoa(sourceFileID))
 	// What an earlier attempt extracted may be incomplete.
 	if err := os.RemoveAll(dest); err != nil {
 		return nil, err
@@ -1013,7 +1512,7 @@ func (d *Downloads) unpack(ctx context.Context, j *job, system domain.System, pa
 	d.log.Info("extracted", "archive", filepath.Base(path), "files", len(files), "bytes", size)
 	out := make([]stagedFile, 0, len(files))
 	for _, f := range files {
-		out = append(out, stagedFile{From: filepath.Join(dest, f.Rel), Rel: f.Rel, SHA1: f.SHA1})
+		out = append(out, stagedFile{From: filepath.Join(dest, f.Rel), Rel: f.Rel, SHA1: f.SHA1, SourceFileID: sourceFileID})
 	}
 	return out, nil
 }
@@ -1041,7 +1540,7 @@ func (d *Downloads) place(staged []stagedFile, dir string) ([]domain.PlacedFile,
 			d.removeFiles(placed, dir)
 			return nil, fmt.Errorf("move into %s: %w", dir, err)
 		}
-		placed = append(placed, domain.PlacedFile{Path: target, SizeBytes: info.Size(), ModTime: info.ModTime().UTC(), SHA1: f.SHA1})
+		placed = append(placed, domain.PlacedFile{Path: target, SizeBytes: info.Size(), ModTime: info.ModTime().UTC(), SHA1: f.SHA1, SourceFileID: f.SourceFileID})
 	}
 	return placed, nil
 }
@@ -1118,6 +1617,18 @@ func (d *Downloads) pending() int64 {
 	var n int64
 	for _, j := range d.jobs {
 		if j.State != domain.StateFailed {
+			n += max(j.Total-j.Received, 0)
+		}
+	}
+	return n
+}
+
+func (d *Downloads) pendingExcept(id int) int64 {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var n int64
+	for _, j := range d.jobs {
+		if j.ROMID != id && j.State != domain.StateFailed {
 			n += max(j.Total-j.Received, 0)
 		}
 	}

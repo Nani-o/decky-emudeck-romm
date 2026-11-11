@@ -23,10 +23,87 @@ func rels(l Layout) []string {
 }
 
 func TestPlanLayoutSingleFile(t *testing.T) {
-	// A folder game with one file goes in as that file, wherever it sits in the folder.
+	// A Switch game's base stays under the folder that will also hold updates and DLC.
 	l, err := PlanLayout(system(t, "switch"), "Zelda", files("Zelda.nsp"))
-	if err != nil || l.Root != "Zelda.nsp" || rels(l)[0] != "Zelda.nsp" || l.Playlist != nil {
+	if err != nil || l.Root != "Zelda.nsp" || rels(l)[0] != "Zelda.nsp/Zelda.nsp" || l.Playlist != nil {
 		t.Fatalf("%+v, %v", l, err)
+	}
+}
+
+func TestPlanLayoutRejectsUnsafeSwitchLaunchPaths(t *testing.T) {
+	for _, bad := range []string{"`", "|", "\r", "\n", "\t"} {
+		t.Run(bad, func(t *testing.T) {
+			name := "Bad" + bad + "Name.nsp"
+			_, err := PlanLayout(system(t, "switch"), "Game", []ROMFile{{ID: 1, Name: name, Path: name, Category: "game"}})
+			if err == nil {
+				t.Fatalf("accepted unsafe launch path %q", name)
+			}
+		})
+	}
+	_, err := PlanLayout(system(t, "switch"), "Bad`Game", []ROMFile{{ID: 1, Name: "Game.rar", Path: "Game.rar", Category: "game"}})
+	if err == nil {
+		t.Fatal("accepted unsafe game root")
+	}
+}
+
+func TestPlanLayoutSwitchContent(t *testing.T) {
+	content := []ROMFile{
+		{ID: 1, Name: "Mario.nsp", Path: "Mario.nsp", Category: "game"},
+		{ID: 2, Name: "update.nsp", Path: "update/update.nsp", Category: "update"},
+		{ID: 3, Name: "wave1.nsp", Path: "Wave 1/wave1.nsp", Category: "dlc"},
+		{ID: 4, Name: "manual.pdf", Path: "manual.pdf", Category: "manual"},
+	}
+	l, err := PlanLayout(system(t, "switch"), "Mario Kart", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Root != "Mario.nsp" || !slices.Equal(rels(l), []string{
+		"Mario.nsp/Mario.nsp", "Mario.nsp/update/update.nsp", "Mario.nsp/dlc/Wave 1/wave1.nsp",
+	}) {
+		t.Fatalf("layout %+v, rels %q", l, rels(l))
+	}
+}
+
+func TestPlanLayoutCanonicalizesSwitchCategoryPrefix(t *testing.T) {
+	l, err := PlanLayout(system(t, "switch"), "Mario Kart", []ROMFile{
+		{ID: 1, Name: "Mario.nsp", Path: "Mario.nsp", Category: "game"},
+		{ID: 2, Name: "4.0.1.nsp", Path: "Update/4.0.1.nsp", Category: "update"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rels(l); len(got) != 2 || got[1] != "Mario.nsp/update/4.0.1.nsp" {
+		t.Fatalf("category path wasn't canonicalized: %q", got)
+	}
+}
+
+func TestPlanLayoutRejectsNormalizedAndParentPathCollisions(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		files []ROMFile
+	}{
+		{
+			name: "category normalization",
+			files: []ROMFile{
+				{ID: 1, Name: "Game.nsp", Path: "Game.nsp", Category: "game"},
+				{ID: 2, Name: "a.nsp", Path: "a.nsp", Category: "update"},
+				{ID: 3, Name: "a.nsp", Path: "Update/a.nsp", Category: "update"},
+			},
+		},
+		{
+			name: "file parent conflict",
+			files: []ROMFile{
+				{ID: 1, Name: "Game.nsp", Path: "Game.nsp", Category: "game"},
+				{ID: 2, Name: "a.nsp", Path: "update/a.nsp", Category: "update"},
+				{ID: 3, Name: "child.nsp", Path: "update/a.nsp/child.nsp", Category: "update"},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := PlanLayout(system(t, "switch"), "Game", test.files); err == nil {
+				t.Fatal("accepted overlapping Switch paths")
+			}
+		})
 	}
 }
 

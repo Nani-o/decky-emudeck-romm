@@ -69,6 +69,9 @@ func PlanLayout(system System, game string, files []ROMFile) (Layout, error) {
 			return Layout{}, &Error{Kind: KindCantDownload, Message: "RomM lists a file that would land outside the ROM folder: " + f.Path}
 		}
 	}
+	if system.Folder == "switch" {
+		return switchLayout(game, files)
+	}
 	if len(files) == 1 {
 		f := files[0]
 		return Layout{Root: f.Name, Files: []PlannedFile{{File: f, Rel: f.Name}}}, nil
@@ -94,6 +97,123 @@ func PlanLayout(system System, game string, files []ROMFile) (Layout, error) {
 		return Layout{Root: root, Files: inside(""), Zip: true}, nil
 	}
 	return Layout{}, &Error{Kind: KindCantDownload, Message: "The plugin has no way to lay out a game of several files in EmuDeck's " + system.Folder + " folder."}
+}
+
+// IsSwitchLaunchFile says whether ES-DE treats name as a Switch game file.
+func IsSwitchLaunchFile(name string) bool {
+	switch extOf(name) {
+	case "nsp", "xci", "nro", "nso", "nca":
+		return true
+	default:
+		return false
+	}
+}
+
+// SafeESDELaunchPath rejects characters ES-DE 3.5 passes unescaped through its launcher template.
+func SafeESDELaunchPath(path string) bool {
+	return !strings.ContainsAny(path, "`|\r\n\t")
+}
+
+// switchLayout puts a base game and its updates/DLC under one ES-DE entry. Eden's folder scanner
+// reads these files recursively, and keeping one root lets the save resolver find the game's save.
+func switchLayout(game string, files []ROMFile) (Layout, error) {
+	if !filepath.IsLocal(game) || game == "." {
+		return Layout{}, &Error{Kind: KindCantDownload, Message: "RomM lists a game name that would land outside the ROM folder."}
+	}
+	base := false
+	var baseFiles []ROMFile
+	for _, f := range files {
+		if f.IsGame() {
+			baseFiles = append(baseFiles, f)
+		}
+	}
+	root := game
+	if len(baseFiles) == 1 && IsSwitchLaunchFile(baseFiles[0].Name) && filepath.Base(baseFiles[0].Name) == baseFiles[0].Name {
+		// ES-DE treats a directory named after a supported file extension as a single entry and
+		// launches the matching file inside it. This keeps updates/DLC in a common folder while
+		// exposing only the base game in the system list.
+		root = baseFiles[0].Name
+	}
+	out := make([]PlannedFile, 0, len(files))
+	for _, f := range files {
+		category := strings.ToLower(strings.TrimSpace(f.Category))
+		if category == "" || category == "game" {
+			base = true
+			category = ""
+		} else if category != "update" && category != "dlc" {
+			continue
+		}
+		rel := filepath.FromSlash(f.Path)
+		if category == "" && root != game && len(baseFiles) == 1 {
+			rel = f.Name
+		}
+		if category != "" {
+			parts := strings.Split(filepath.ToSlash(rel), "/")
+			if strings.EqualFold(parts[0], category) {
+				parts[0] = category
+				rel = filepath.FromSlash(strings.Join(parts, "/"))
+			} else {
+				rel = filepath.Join(category, rel)
+			}
+		}
+		if !filepath.IsLocal(rel) {
+			return Layout{}, &Error{Kind: KindCantDownload, Message: "RomM lists a file that would land outside the game folder: " + f.Path}
+		}
+		planned := filepath.Join(root, rel)
+		if f.IsGame() && !SafeESDELaunchPath(planned) {
+			return Layout{}, &Error{Kind: KindCantDownload, Message: "RomM lists a Switch game path that ES-DE can't safely launch."}
+		}
+		out = append(out, PlannedFile{File: f, Rel: planned})
+	}
+	if !base {
+		return Layout{}, &Error{Kind: KindCantDownload, Message: "RomM lists Switch updates or DLC without a base game."}
+	}
+	if err := validateSwitchTargets(out); err != nil {
+		return Layout{}, err
+	}
+	if len(out) == 0 {
+		return Layout{}, &Error{Kind: KindCantDownload, Message: "RomM lists no Switch game files for this game."}
+	}
+	return Layout{Root: root, Files: out}, nil
+}
+
+func validateSwitchTargets(files []PlannedFile) error {
+	type node struct {
+		file     bool
+		children map[string]*node
+	}
+	root := &node{children: map[string]*node{}}
+	for _, f := range files {
+		rel := filepath.Clean(f.Rel)
+		if !filepath.IsLocal(rel) || rel == "." {
+			return &Error{Kind: KindCantDownload, Message: "RomM lists an invalid Switch content path."}
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		current := root
+		for i, part := range parts {
+			if current.file {
+				return switchPathCollision()
+			}
+			child := current.children[part]
+			if child == nil {
+				child = &node{children: map[string]*node{}}
+				current.children[part] = child
+			}
+			last := i == len(parts)-1
+			if last {
+				if child.file || len(child.children) > 0 {
+					return switchPathCollision()
+				}
+				child.file = true
+			}
+			current = child
+		}
+	}
+	return nil
+}
+
+func switchPathCollision() error {
+	return &Error{Kind: KindCantDownload, Message: "RomM lists Switch content files that overlap at the same path."}
 }
 
 func playlistLayout(game string, files []ROMFile) (Layout, error) {

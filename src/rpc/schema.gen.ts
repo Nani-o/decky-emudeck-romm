@@ -1521,6 +1521,7 @@ export interface SaveStatus {
    */
   syncs: boolean;
   why?: string;
+  whyCode?: string;
   /**
    * Path is the save file, emulator the tag RomM keeps it under (a RetroArch core's name, or the
    * standalone emulator's), and saver the name of the emulator that writes it.

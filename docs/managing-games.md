@@ -51,6 +51,12 @@ it downloaded once a day.
 - **Ignore this update** keeps the version you have. The plugin offers an update again only when
   RomM's files change again.
 
+For Switch, the update check includes the indexed base, update and DLC manifest. Adding or removing
+an extra can therefore offer an update even when the base ROM is unchanged. Verified unchanged
+content stays on the Deck. Only the changed content transfers; the client retains the title's local
+entry and checks legacy file ownership before changing its layout. Ambiguous or unsupported format
+transitions are refused rather than guessed. A fresh download may be needed for those transitions.
+
 Before an update, the game's save syncs with RomM. If the update renames the game, and so the name
 its emulator gives its save, the save moves to the new name and a copy stays in the game's backups.
 

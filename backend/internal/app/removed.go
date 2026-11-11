@@ -129,7 +129,8 @@ func (d *Downloads) rematchIn(ctx context.Context, platformID int, recs []goneRe
 			var snapshot []domain.FileSnapshot
 			if to, snapshot, ok = matchSnapshot(r.owned.Snapshot, games); ok {
 				moved := *r.owned
-				moved.ROMID, moved.Snapshot = to, snapshot
+				moved.ROMID = to
+				moved.Snapshot = append(snapshot, nonBaseSnapshots(r.owned.Snapshot)...)
 				if err := d.store.MoveOwned(ctx, r.id, moved); err != nil {
 					return nil, err
 				}
@@ -160,6 +161,7 @@ func (d *Downloads) rematchIn(ctx context.Context, platformID int, recs []goneRe
 // matchSnapshot finds the ROM among games whose game files have the hashes snapshot holds, one for
 // one, and returns its id and the snapshot of its files. The lowest id wins a tie.
 func matchSnapshot(snapshot []domain.FileSnapshot, games map[int][]domain.ROMFile) (int, []domain.FileSnapshot, bool) {
+	snapshot = domain.BaseSnapshots(snapshot)
 	keys := make([]string, 0, len(snapshot))
 	for _, s := range snapshot {
 		if s.Hash == "" {
@@ -201,6 +203,16 @@ next:
 		return id, out, true
 	}
 	return 0, nil, false
+}
+
+func nonBaseSnapshots(snapshot []domain.FileSnapshot) []domain.FileSnapshot {
+	var out []domain.FileSnapshot
+	for _, s := range snapshot {
+		if len(domain.BaseSnapshots([]domain.FileSnapshot{s})) == 0 {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // snapshotKey is a snapshot's hash as hashKey writes it.

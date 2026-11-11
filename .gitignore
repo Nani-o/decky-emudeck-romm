@@ -10,3 +10,4 @@ dev/.data/
 .env
 .env.keys
 .envrc
+.work/

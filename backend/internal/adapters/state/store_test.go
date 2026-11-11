@@ -36,8 +36,8 @@ func TestOwnedRoundTrip(t *testing.T) {
 	rom := domain.OwnedROM{
 		ROMID:       7,
 		PlatformID:  2,
-		Files:       []domain.PlacedFile{{Path: "/e/roms/snes/Chrono Trigger.sfc", SizeBytes: 4 << 20, ModTime: at, SHA1: "abc"}},
-		Snapshot:    []domain.FileSnapshot{{FileID: 70, SizeBytes: 4 << 20, LastModified: at, HashKind: "sha1", Hash: "def"}},
+		Files:       []domain.PlacedFile{{Path: "/e/roms/snes/Chrono Trigger.sfc", SizeBytes: 4 << 20, ModTime: at, SourceFileID: 70, SHA1: "abc"}},
+		Snapshot:    []domain.FileSnapshot{{FileID: 71, Category: "dlc", SizeBytes: 4 << 20, LastModified: at, HashKind: "sha1", Hash: "def"}},
 		InstalledAt: at,
 		Media:       []domain.PlacedFile{{Path: "/e/tools/downloaded_media/snes/covers/Chrono Trigger.png", SizeBytes: 300, ModTime: at, SHA1: "ghi"}},
 	}
@@ -88,6 +88,35 @@ func TestOwnedRoundTrip(t *testing.T) {
 	if err := s.db.QueryRow("SELECT (SELECT COUNT(*) FROM owned_files) + (SELECT COUNT(*) FROM owned_media) + (SELECT COUNT(*) FROM server_snapshots)").
 		Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("%d rows left, %v", rows, err)
+	}
+}
+
+func TestContentManifestMigrationKeepsLegacyOwnership(t *testing.T) {
+	saved := migrations
+	t.Cleanup(func() { migrations = saved })
+	migrations = migrations[:len(migrations)-1]
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	s := open(t, path)
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO owned_roms (rom_id, platform_id, installed_at, update_available, ignores_update) VALUES (8, 9, 0, 0, 0)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO owned_files (rom_id, path, size_bytes, mod_time, sha1) VALUES (8, '/e/roms/switch/Game.nsp', 12, 0, '')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT INTO server_snapshots (rom_id, file_id, size_bytes, last_modified, hash_kind, hash) VALUES (8, 80, 12, 0, '', '')"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	migrations = saved
+	s = open(t, path)
+	defer func() { _ = s.Close() }()
+	got, ok, err := s.Owned(ctx, 8)
+	if err != nil || !ok || len(got.Files) != 1 || got.Files[0].SourceFileID != 0 ||
+		len(got.Snapshot) != 1 || got.Snapshot[0].Category != "" || got.Snapshot[0].FileID != 80 {
+		t.Fatalf("legacy ownership after migration: %+v, ok=%t, err=%v", got, ok, err)
 	}
 }
 
@@ -499,12 +528,12 @@ func TestIgnoreUpdate(t *testing.T) {
 	if err := s.SetUpdateAvailable(ctx, 1, true); err != nil {
 		t.Fatal(err)
 	}
-	ignored := []domain.FileSnapshot{{FileID: 11, HashKind: "sha1", Hash: "new"}}
+	ignored := []domain.FileSnapshot{{FileID: 11, Category: "update", HashKind: "sha1", Hash: "new"}}
 	if err := s.IgnoreUpdate(ctx, 1, ignored); err != nil {
 		t.Fatal(err)
 	}
 	got, _, _ := s.Owned(ctx, 1)
-	if len(got.Ignored) != 1 || got.Ignored[0].Hash != "new" || len(got.Snapshot) != 1 || got.Snapshot[0].Hash != "old" {
+	if len(got.Ignored) != 1 || got.Ignored[0].Hash != "new" || got.Ignored[0].Category != "update" || len(got.Snapshot) != 1 || got.Snapshot[0].Hash != "old" {
 		t.Fatalf("record %+v", got)
 	}
 	if ids, _ := s.UpdateIDs(ctx); len(ids) != 0 {

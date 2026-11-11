@@ -69,10 +69,11 @@ func (c *Client) NegotiateSync(ctx context.Context, req domain.SyncRequest) (dom
 	}
 	in := struct {
 		DeviceID        string       `json:"device_id"`
+		Emulators       []string     `json:"emulators,omitempty"`
 		Saves           []clientSave `json:"saves"`
 		ROMIDs          []int        `json:"rom_ids"`
 		RestoreUnlisted bool         `json:"restore_unlisted"`
-	}{DeviceID: req.DeviceID, Saves: []clientSave{}, ROMIDs: req.ROMIDs, RestoreUnlisted: req.RestoreUnlisted}
+	}{DeviceID: req.DeviceID, Emulators: req.Emulators, Saves: []clientSave{}, ROMIDs: req.ROMIDs, RestoreUnlisted: req.RestoreUnlisted}
 	for _, s := range req.Saves {
 		in.Saves = append(in.Saves, clientSave{
 			ROMID: s.ROMID, FileName: s.FileName, Slot: s.Slot, Emulator: s.Emulator, ContentHash: s.ContentHash,

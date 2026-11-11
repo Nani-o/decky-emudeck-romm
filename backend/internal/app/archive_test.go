@@ -121,6 +121,26 @@ func TestDiscArchiveIsExtracted(t *testing.T) {
 	}
 }
 
+func TestExtractRejectsOverlappingArchiveMembersBeforeWriting(t *testing.T) {
+	archivePath := filepath.Join(t.TempDir(), "duplicate.zip")
+	data := zipOf(t, member{"same.nsp", "first"}, member{"same.nsp", "second"})
+	if err := os.WriteFile(archivePath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	members, closeArchive, err := openArchive(archivePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = closeArchive() }()
+	dest := filepath.Join(t.TempDir(), "extracted")
+	if _, err := extract(members, dest); err == nil {
+		t.Fatal("extracted duplicate member paths")
+	}
+	if got := listDir(t, dest); len(got) != 0 {
+		t.Fatalf("wrote archive members before rejecting collision: %v", got)
+	}
+}
+
 func TestNestedArchiveFoldersGoWithDelete(t *testing.T) {
 	f := newDownloadFixture(t, 2)
 	f.serve(5, "Ridge Racer.zip", zipOf(t, member{"Ridge Racer/Disc.cue", "cue"}, member{"Ridge Racer/Disc.bin", "bin"}))

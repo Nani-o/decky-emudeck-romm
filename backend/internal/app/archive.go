@@ -32,8 +32,10 @@ type unpackedFile struct {
 
 // openArchive lists the files in the .zip or .7z at path, folders aside. close releases the
 // archive once its members are read.
-func openArchive(path string) (members []archiveMember, close func() error, err error) {
+func openArchive(path string, rarVolumes ...string) (members []archiveMember, close func() error, err error) {
 	switch strings.ToLower(filepath.Ext(path)) {
+	case ".rar":
+		return openRAR(path, rarVolumes)
 	case ".zip":
 		r, err := zip.OpenReader(path)
 		if err != nil {
@@ -76,12 +78,20 @@ func memberPath(name string) (string, error) {
 
 // extract writes members under dest, hashing each as it goes.
 func extract(members []archiveMember, dest string) ([]unpackedFile, error) {
-	out := make([]unpackedFile, 0, len(members))
-	for _, m := range members {
+	rels := make([]string, len(members))
+	for i, m := range members {
 		rel, err := memberPath(m.Name)
 		if err != nil {
 			return nil, err
 		}
+		rels[i] = rel
+	}
+	if err := validateRelativeFileTargets(rels); err != nil {
+		return nil, err
+	}
+	out := make([]unpackedFile, 0, len(members))
+	for i, m := range members {
+		rel := rels[i]
 		sum, err := extractMember(m, filepath.Join(dest, rel))
 		if err != nil {
 			return nil, err
@@ -89,6 +99,45 @@ func extract(members []archiveMember, dest string) ([]unpackedFile, error) {
 		out = append(out, unpackedFile{Rel: rel, SHA1: sum})
 	}
 	return out, nil
+}
+
+func validateRelativeFileTargets(paths []string) error {
+	type node struct {
+		file     bool
+		children map[string]*node
+	}
+	root := &node{children: map[string]*node{}}
+	for _, path := range paths {
+		rel := filepath.Clean(path)
+		if !filepath.IsLocal(rel) || rel == "." {
+			return &domain.Error{Kind: domain.KindCantDownload, Message: "RomM lists an invalid game file path."}
+		}
+		current := root
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		for i, part := range parts {
+			if current.file {
+				return overlappingFileTargets()
+			}
+			child := current.children[part]
+			if child == nil {
+				child = &node{children: map[string]*node{}}
+				current.children[part] = child
+			}
+			last := i == len(parts)-1
+			if last {
+				if child.file || len(child.children) > 0 {
+					return overlappingFileTargets()
+				}
+				child.file = true
+			}
+			current = child
+		}
+	}
+	return nil
+}
+
+func overlappingFileTargets() error {
+	return &domain.Error{Kind: domain.KindCantDownload, Message: "RomM lists game files that overlap at the same path."}
 }
 
 func extractMember(m archiveMember, path string) (string, error) {

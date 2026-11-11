@@ -1196,8 +1196,9 @@ const (
 type SaveStatus struct {
 	ID int `json:"id"`
 	// Syncs is unset when the plugin doesn't sync the game's saves; why says why.
-	Syncs bool   `json:"syncs"`
-	Why   string `json:"why,omitempty"`
+	Syncs   bool   `json:"syncs"`
+	Why     string `json:"why,omitempty"`
+	WhyCode string `json:"whyCode,omitempty"`
 	// Path is the save file, emulator the tag RomM keeps it under (a RetroArch core's name, or the
 	// standalone emulator's), and saver the name of the emulator that writes it.
 	Path     string `json:"path,omitempty"`

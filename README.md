@@ -1,3 +1,18 @@
+# Nani fork of EmuDeck RomM Sync
+
+This fork keeps EmuDeck and ES-DE as the emulator setup and game frontend. It extends the upstream
+download pipeline to manage Switch game files, updates and DLC together while retaining their RomM
+categories and protecting local user-managed files and saves.
+
+The fork starts from upstream version 0.5.0. Its first implementation is being validated; the
+platform coverage and installation steps below remain the upstream baseline until each added path
+has passed its runtime checks.
+
+Upstream project: [chenasraf/decky-emudeck-romm](https://github.com/chenasraf/decky-emudeck-romm).
+The original authors and GPL-3.0 license are retained.
+
+---
+
 <p align="center">
   <img src="assets/banner.svg" alt="EmuDeck RomM Sync" width="100%">
 </p>
@@ -34,28 +49,26 @@ Quick Access Menu, without leaving Gaming Mode.
 - [EmuDeck](https://www.emudeck.com), set up with ES-DE.
 - A [RomM](https://romm.app) server, version 5.1.0 or newer, reachable from the Deck.
 
-## Install
+## Installing this fork
 
-1. Download `decky-emudeck-romm.zip` from the
-   [latest release](https://github.com/chenasraf/decky-emudeck-romm/releases/latest).
-2. In Decky's settings, turn on **Developer mode**, then in the **Developer** tab choose **Install
-   Plugin from ZIP** and pick the file.
-3. Open the Quick Access Menu, choose **EmuDeck RomM Sync** and press **Set up RomM**.
+There is no published fork release yet. The Homelab deployment uses the immutable upstream 0.5.0
+frontend together with a separately built backend from this fork. Its installer pins the fork
+commit, source archive, Go compiler and Linux binary, and preserves the existing device identity,
+settings and game database.
 
-To skip the download, enter this address under **Install Plugin from URL** in the same tab instead
-and press **Install**:
+For a source build, follow [DEVELOPMENT.md](DEVELOPMENT.md) and package this checkout with
+`make package`. Installing an upstream release alone does not install this fork's additions. The
+default RPC protocol is unchanged; the backend version is `0.5.0-nani.1`.
 
-```
-https://decky-romm.casraf.dev/latest.zip
-```
+Switch extras are stored under each game's `update` and `dlc` directories. The fork writes ES-DE
+`noload.txt` markers there; Eden needs its native recursive game-directory scan and external-content
+option enabled. Save synchronization uses an explicit Eden NAND/profile/title binding. Games with no
+qualified title binding keep local saves; they do not acquire a guessed save mapping. Invalid
+bindings and sync conflicts are reported separately. These additions require runtime validation
+before being treated as supported on a particular device.
 
-Or:
-
-```
-https://github.com/chenasraf/decky-emudeck-romm/releases/latest/download/decky-emudeck-romm.zip
-```
-
-The [getting started guide](docs/getting-started.md) walks through setup and signing in.
+The upstream [getting started guide](docs/getting-started.md) explains the original setup and
+sign-in flow; its release download links install the stock upstream plugin.
 
 ## Documentation
 

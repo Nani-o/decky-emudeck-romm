@@ -141,8 +141,10 @@ const SyncBatch = 500
 
 type SyncRequest struct {
 	DeviceID string
-	Saves    []ClientSave
-	ROMIDs   []int
+	// Emulators bounds server pairing to loadable formats; nil preserves prior behavior.
+	Emulators []string
+	Saves     []ClientSave
+	ROMIDs    []int
 	// RestoreUnlisted offers RomM's save of a ROM the Deck lists none for even when this Device
 	// synced it before: a save missing from the Deck comes back rather than counting as deleted.
 	RestoreUnlisted bool

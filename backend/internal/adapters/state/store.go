@@ -184,6 +184,11 @@ CREATE TABLE state_prefs (
 	keep   INTEGER
 );
 `,
+	`
+ALTER TABLE owned_files ADD COLUMN source_file_id INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE server_snapshots ADD COLUMN category TEXT NOT NULL DEFAULT '';
+ALTER TABLE ignored_updates ADD COLUMN category TEXT NOT NULL DEFAULT '';
+`,
 }
 
 // metaLastSweep is when the last sweep of every Plugin-owned ROM for updates finished.
@@ -407,8 +412,13 @@ func (s *Store) IgnoreUpdate(ctx context.Context, id int, files []domain.FileSna
 // insertPlaced writes files into table, owned_files or owned_media, for the ROM with id.
 func insertPlaced(ctx context.Context, tx *sql.Tx, table string, id int, files []domain.PlacedFile) error {
 	for _, f := range files {
-		if _, err := tx.ExecContext(ctx, "INSERT INTO "+table+" (rom_id, path, size_bytes, mod_time, sha1) VALUES (?, ?, ?, ?, ?)",
-			id, f.Path, f.SizeBytes, f.ModTime.UnixNano(), f.SHA1); err != nil {
+		query := "INSERT INTO " + table + " (rom_id, path, size_bytes, mod_time, sha1) VALUES (?, ?, ?, ?, ?)"
+		args := []any{id, f.Path, f.SizeBytes, f.ModTime.UnixNano(), f.SHA1}
+		if table == "owned_files" {
+			query = "INSERT INTO owned_files (rom_id, path, size_bytes, mod_time, sha1, source_file_id) VALUES (?, ?, ?, ?, ?, ?)"
+			args = append(args, f.SourceFileID)
+		}
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			return err
 		}
 	}
@@ -419,8 +429,8 @@ func insertPlaced(ctx context.Context, tx *sql.Tx, table string, id int, files [
 func insertSnapshots(ctx context.Context, tx *sql.Tx, table string, id int, files []domain.FileSnapshot) error {
 	for _, f := range files {
 		if _, err := tx.ExecContext(ctx, "INSERT INTO "+table+
-			" (rom_id, file_id, size_bytes, last_modified, hash_kind, hash) VALUES (?, ?, ?, ?, ?, ?)",
-			id, f.FileID, f.SizeBytes, f.LastModified.UnixNano(), f.HashKind, f.Hash); err != nil {
+			" (rom_id, file_id, size_bytes, last_modified, hash_kind, hash, category) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			id, f.FileID, f.SizeBytes, f.LastModified.UnixNano(), f.HashKind, f.Hash, f.Category); err != nil {
 			return err
 		}
 	}
@@ -537,7 +547,11 @@ func (s *Store) Owned(ctx context.Context, id int) (domain.OwnedROM, bool, error
 
 // placed reads the files table, owned_files or owned_media, holds for the ROM with id.
 func (s *Store) placed(ctx context.Context, table string, id int) ([]domain.PlacedFile, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT path, size_bytes, mod_time, sha1 FROM "+table+" WHERE rom_id = ? ORDER BY path", id)
+	query := "SELECT path, size_bytes, mod_time, sha1 FROM " + table + " WHERE rom_id = ? ORDER BY path"
+	if table == "owned_files" {
+		query = "SELECT path, size_bytes, mod_time, sha1, source_file_id FROM owned_files WHERE rom_id = ? ORDER BY path"
+	}
+	rows, err := s.db.QueryContext(ctx, query, id)
 	if err != nil {
 		return nil, err
 	}
@@ -546,7 +560,11 @@ func (s *Store) placed(ctx context.Context, table string, id int) ([]domain.Plac
 	for rows.Next() {
 		var f domain.PlacedFile
 		var mod int64
-		if err := rows.Scan(&f.Path, &f.SizeBytes, &mod, &f.SHA1); err != nil {
+		if table == "owned_files" {
+			if err := rows.Scan(&f.Path, &f.SizeBytes, &mod, &f.SHA1, &f.SourceFileID); err != nil {
+				return nil, err
+			}
+		} else if err := rows.Scan(&f.Path, &f.SizeBytes, &mod, &f.SHA1); err != nil {
 			return nil, err
 		}
 		f.ModTime = time.Unix(0, mod).UTC()
@@ -557,7 +575,7 @@ func (s *Store) placed(ctx context.Context, table string, id int) ([]domain.Plac
 
 // snapshots reads the files table, server_snapshots or ignored_updates, holds for the ROM with id.
 func (s *Store) snapshots(ctx context.Context, table string, id int) ([]domain.FileSnapshot, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT file_id, size_bytes, last_modified, hash_kind, hash FROM "+table+
+	rows, err := s.db.QueryContext(ctx, "SELECT file_id, size_bytes, last_modified, hash_kind, hash, category FROM "+table+
 		" WHERE rom_id = ? ORDER BY file_id", id)
 	if err != nil {
 		return nil, err
@@ -567,7 +585,7 @@ func (s *Store) snapshots(ctx context.Context, table string, id int) ([]domain.F
 	for rows.Next() {
 		var f domain.FileSnapshot
 		var mod int64
-		if err := rows.Scan(&f.FileID, &f.SizeBytes, &mod, &f.HashKind, &f.Hash); err != nil {
+		if err := rows.Scan(&f.FileID, &f.SizeBytes, &mod, &f.HashKind, &f.Hash, &f.Category); err != nil {
 			return nil, err
 		}
 		f.LastModified = time.Unix(0, mod).UTC()

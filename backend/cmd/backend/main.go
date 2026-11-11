@@ -193,6 +193,7 @@ func run(log *slog.Logger, level *slog.LevelVar) error {
 	}
 	home := userHome(log)
 	saves := app.NewSaves(ctx, cache, install, conn, saveDial, ownership, saveStore, stateErr, app.SaveSources{
+		Eden:      app.NewEdenSaves(home, settingsDir),
 		Launchers: esdecfg.New(home), Configs: emudeck.NewSaveConfigs(home), N64: emudeck.NewN64Database(home),
 		PSX: psxdisc.Discs{}, DuckStation: emudeck.NewDuckStation(home), States: store,
 	}, runningGame,

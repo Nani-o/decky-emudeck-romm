@@ -67,6 +67,12 @@ func (m *Media) SetEnabled(on bool) error { return m.prefs.SetESDEMedia(on) }
 // screenshot per game. Art is a nicety, so what can't be fetched or written is logged and skipped,
 // and a nil Media places nothing.
 func (m *Media) Place(ctx context.Context, romID int, dir, entry string) []domain.PlacedFile {
+	return m.place(ctx, romID, dir, entry, false)
+}
+
+// place keeps a directory's suffix: ES-DE treats it as part of the folder name,
+// including for a directory such as Game.nsp interpreted as a single game.
+func (m *Media) place(ctx context.Context, romID int, dir, entry string, directory bool) []domain.PlacedFile {
 	if m == nil || !m.prefs.ESDEMedia() {
 		return nil
 	}
@@ -77,6 +83,9 @@ func (m *Media) Place(ctx context.Context, romID int, dir, entry string) []domai
 	// ES-DE names a game's media after its file or folder, without the extension, mirroring any
 	// folders the game sits in under its system's.
 	stem := filepath.FromSlash(strings.TrimSuffix(game, filepath.Ext(game)))
+	if directory {
+		stem = filepath.FromSlash(game)
+	}
 
 	var out []domain.PlacedFile
 	place := func(kind string, data []byte) {
@@ -175,7 +184,11 @@ func (d *Downloads) placeMedia(ctx context.Context, id int, dir, root string) []
 	if err != nil || !filepath.IsLocal(rel) {
 		return nil
 	}
-	return d.media.Place(ctx, id, state.ESDE.MediaDirectory, rel)
+	info, err := os.Stat(filepath.Join(dir, root))
+	if err != nil {
+		return nil
+	}
+	return d.media.place(ctx, id, state.ESDE.MediaDirectory, rel, info.IsDir())
 }
 
 // removeMedia deletes the art the plugin placed for a game, leaving any that ES-DE's scraper or the

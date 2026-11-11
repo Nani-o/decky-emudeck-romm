@@ -36,7 +36,7 @@ func TestExtracts(t *testing.T) {
 
 func TestIsArchive(t *testing.T) {
 	for name, want := range map[string]bool{
-		"Game.zip": true, "Game.ZIP": true, "Game.7z": true, "Game.sfc": false, "Game.rar": false, "zip": false,
+		"Game.zip": true, "Game.ZIP": true, "Game.7z": true, "Game.sfc": false, "Game.rar": true, "Game.RAR": true, "zip": false,
 	} {
 		if IsArchive(name) != want {
 			t.Errorf("IsArchive(%q) != %v", name, want)

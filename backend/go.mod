@@ -11,6 +11,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.3.0
 	github.com/chenasraf/saveporter v0.2.0
 	github.com/fsnotify/fsnotify v1.10.1
+	github.com/nwaples/rardecode/v2 v2.4.6
 	golang.org/x/sync v0.22.0
 	modernc.org/sqlite v1.59.0
 )

@@ -154,7 +154,7 @@ func (d *Downloads) recognizedBy(ctx context.Context, server DownloadServer) (ch
 			mismatched++
 			continue
 		}
-		for _, snap := range rec.Snapshot {
+		for _, snap := range domain.BaseSnapshots(rec.Snapshot) {
 			if !slices.ContainsFunc(files, func(f domain.ROMFile) bool { return f.ID == snap.FileID }) {
 				mismatched++
 				break

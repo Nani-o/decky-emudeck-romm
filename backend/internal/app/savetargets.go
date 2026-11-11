@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -50,6 +51,8 @@ type DuckStationGames interface {
 // SaveSources are what save sync reads, besides the Deck's saves, to tell how each game's save is
 // named and which emulator writes it.
 type SaveSources struct {
+	// Eden is an optional explicit account/profile/title binding.
+	Eden        *EdenSaves
 	Launchers   Launchers
 	Configs     SaveConfigs
 	N64         N64Database
@@ -61,9 +64,10 @@ type SaveSources struct {
 
 // saveTarget is a game whose save the plugin syncs.
 type saveTarget struct {
-	romID int
-	name  string
-	path  string
+	romID           int
+	name            string
+	path            string
+	unsupportedCode string
 	// rule is how the emulator that plays the game names its save, and emulator the tag RomM keeps
 	// the save under.
 	rule     domain.SaveRule
@@ -166,6 +170,49 @@ func (s *Saves) resolve(ctx context.Context, id int, shared bool) (saveTarget, s
 	rule, tag, why := s.launch(folder, filepath.ToSlash(rel), state)
 	if why != "" {
 		return saveTarget{}, why, nil
+	}
+	if rule.Kind == domain.SaveSwitchFolder {
+		if s.eden == nil {
+			return saveTarget{}, "Eden save binding is not configured.", nil
+		}
+		in, err := s.conn.activeSignIn()
+		if err != nil {
+			return saveTarget{}, "", err
+		}
+		if in == nil {
+			return saveTarget{}, "Sign in to RomM first.", nil
+		}
+		root, title, err := s.eden.target(in.Server.URL, in.DeviceID, id)
+		if err != nil {
+			if errors.Is(err, errEdenUnmapped) {
+				return saveTarget{unsupportedCode: edenUnmappedWhyCode}, err.Error(), nil
+			}
+			return saveTarget{}, err.Error(), nil
+		}
+		if err := edenRecoveryReady(s.eden.home, root); err != nil {
+			return saveTarget{}, err.Error(), nil
+		}
+		guard := func() error {
+			current, err := s.conn.activeSignIn()
+			if err != nil {
+				return err
+			}
+			if current == nil || current.Server.URL != in.Server.URL || current.DeviceID != in.DeviceID {
+				return errors.New("Eden signed-in identity changed")
+			}
+			if s.runs("eden") {
+				return closeFirst(rule.Emulator)
+			}
+			now, _, err := s.eden.target(in.Server.URL, in.DeviceID, id)
+			if err != nil {
+				return err
+			}
+			if now != root {
+				return errors.New("Eden save binding changed")
+			}
+			return nil
+		}
+		return saveTarget{romID: id, name: name, path: filepath.Join(filepath.Dir(root), title+".zip"), rule: rule, emulator: "eden", slot: EdenSlot, system: system.Folder, format: edenFolder{root: root, home: s.eden.home, guard: guard}}, "", nil
 	}
 	saves, why := s.saveDir(state, rule.Emulator)
 	if why != "" {
@@ -288,6 +335,16 @@ func (s *Saves) launch(folder, rel string, state domain.InstallState) (domain.Sa
 // name, else EmuDeck's. why says why its saves don't sync, its settings having moved them where
 // the plugin can't follow.
 func (s *Saves) saveDir(state domain.InstallState, e domain.Emulator) (dir, why string) {
+	if e.ID == "eden" {
+		if s.eden == nil {
+			return "", "Eden save binding is not configured."
+		}
+		dir, err := s.eden.basePath()
+		if err != nil {
+			return "", err.Error()
+		}
+		return dir, ""
+	}
 	cfg := s.configs.SaveConfig(e.ID)
 	switch {
 	case cfg.Problem != "":

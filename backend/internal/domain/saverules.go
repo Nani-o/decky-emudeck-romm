@@ -26,6 +26,8 @@ const (
 	// SavePSXCard is a PlayStation memory card DuckStation names after the game's title in its game
 	// database, kept on RomM as is.
 	SavePSXCard
+	// SaveSwitchFolder is one explicitly bound Eden profile/title folder, carried as a ZIP.
+	SaveSwitchFolder
 )
 
 // SaveRule is how an emulator whose saves sync names them and tags them on RomM. Each keeps a game's
@@ -50,6 +52,7 @@ var saveRules = func() []SaveRule {
 		return r
 	}
 	return []SaveRule{
+		rule("eden", SaveRule{Kind: SaveSwitchFolder, Tag: "eden", esdeVar: "%EMULATOR_EDEN%", label: "Eden (Standalone)"}),
 		rule(RetroArchID, SaveRule{Ext: ".srm", Archives: ArchiveNamingOuter, esdeVar: "%EMULATOR_RETROARCH%"}),
 		rule("melonds", SaveRule{Ext: ".sav", Archives: ArchiveNamingInner, Tag: "melonds", esdeVar: "%EMULATOR_MELONDS%", label: "melonDS (Standalone)"}),
 		rule("mgba", SaveRule{Ext: ".sav", Archives: ArchiveNamingOuter, Tag: "mgba", esdeVar: "%EMULATOR_MGBA%", label: "mGBA (Standalone)"}),
