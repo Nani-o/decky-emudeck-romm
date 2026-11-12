@@ -346,11 +346,13 @@ func SnapshotsOf(files []ROMFile) []FileSnapshot {
 	return out
 }
 
-// SnapshotsBySystem selects the update manifest for a system. Switch files include updates and DLC;
-// all other systems retain base-game-only update behavior until they have explicit support.
+// SnapshotsBySystem selects the update manifest installed for a system.
 func SnapshotsBySystem(system System, files []ROMFile) []FileSnapshot {
 	if system.Folder == "switch" {
 		return ContentSnapshotsOf(files)
+	}
+	if system.Folder == "ps3" {
+		return ps3ContentSnapshots(files)
 	}
 	return SnapshotsOf(files)
 }
@@ -360,6 +362,9 @@ func SnapshotsBySystem(system System, files []ROMFile) []FileSnapshot {
 func UpdateAvailableBySystem(system System, snapshot []FileSnapshot, files []ROMFile) bool {
 	if system.Folder == "switch" {
 		return ContentUpdateAvailable(snapshot, files)
+	}
+	if system.Folder == "ps3" {
+		return filesChanged(snapshot, allContentFiles(files), true)
 	}
 	return UpdateAvailable(snapshot, files)
 }

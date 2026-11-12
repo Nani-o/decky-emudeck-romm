@@ -43,6 +43,8 @@ type Installer struct {
 	mu                 sync.Mutex
 	removeTitle        func(string, installedInventory) error
 	archiveRename      func(string, string) error
+	extraRunner        func(string) Runner
+	overlayWrite       func(string, string) error
 }
 
 // New constructs the production adapter. It uses the installed AppImage, the
@@ -118,13 +120,21 @@ func (i *Installer) Install(ctx context.Context, romID int, stagingDir string) (
 		}
 	}
 	if found {
-		if intent.Version != 2 || intent.Inventory == nil || intent.DevHDD0 != profile.DevHDD0 {
+		if err := i.refusePendingOverlay(intent.TitleID); err != nil {
+			return domain.PS3InstallResult{}, err
+		}
+		if (intent.Version != 2 && intent.Version != 3) || intent.BaseKind == "disc" || intent.Inventory == nil || intent.DevHDD0 != profile.DevHDD0 {
 			return domain.PS3InstallResult{}, ErrIntentNeedsReview
 		}
 		if intent.Phase == intentVerified && sameIntentBundle(intent, romID, bundle, profile.UserID) {
-			if err := i.verifyInstalled(profile, bundle); err == nil {
+			verificationBundle := bundle
+			verificationBundle.EntryCount = intent.EntryCount
+			if err := i.verifyInstalled(profile, verificationBundle); err == nil {
 				if err := checkInstalledInventory(filepath.Join(profile.DevHDD0, "game", intent.TitleID), *intent.Inventory, false); err != nil {
 					return domain.PS3InstallResult{}, ErrIntentNeedsReview
+				}
+				if err := i.verifyIntentLicenses(intent, false, false); err != nil {
+					return domain.PS3InstallResult{}, err
 				}
 				return i.result(romID, bundle.Identity, profile.UserID, launcher), nil
 			}
@@ -351,14 +361,24 @@ func pathUnderRoot(root string, components ...string) (string, fs.FileInfo, bool
 type commandRunner struct {
 	home          string
 	xdgConfigHome string
+	xdgCacheHome  string
+	xdgDataHome   string
+	xdgStateHome  string
 }
 
 func (r commandRunner) Run(ctx context.Context, executable string, args ...string) error {
 	command := exec.CommandContext(ctx, executable, args...)
-	command.Env = overrideEnv(os.Environ(), map[string]string{
-		"HOME":            r.home,
-		"XDG_CONFIG_HOME": r.xdgConfigHome,
-	})
+	values := map[string]string{"HOME": r.home, "XDG_CONFIG_HOME": r.xdgConfigHome, "XDG_CACHE_HOME": r.xdgConfigHome}
+	if r.xdgCacheHome != "" {
+		values["XDG_CACHE_HOME"] = r.xdgCacheHome
+	}
+	if r.xdgDataHome != "" {
+		values["XDG_DATA_HOME"] = r.xdgDataHome
+	}
+	if r.xdgStateHome != "" {
+		values["XDG_STATE_HOME"] = r.xdgStateHome
+	}
+	command.Env = overrideEnv(os.Environ(), values)
 	command.Stdout = io.Discard
 	stderr := &boundedTail{limit: 16 << 10}
 	command.Stderr = stderr

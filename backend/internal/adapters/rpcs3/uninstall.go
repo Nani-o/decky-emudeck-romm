@@ -117,11 +117,14 @@ func (i *Installer) removalCheck(ctx context.Context, romID int) (installIntent,
 	if err := ctx.Err(); err != nil {
 		return installIntent{}, false, false, err
 	}
+	if err := i.refusePendingForROM(romID); err != nil {
+		return installIntent{}, true, false, err
+	}
 	intent, found, err := i.ownedIntent(romID)
 	if err != nil || !found {
 		return intent, found, false, err
 	}
-	if intent.Version != 2 || intent.Phase != intentVerified || intent.Inventory == nil || !intent.LicenseOwned {
+	if (intent.Version != 2 && intent.Version != 3) || intent.Phase != intentVerified || intent.Inventory == nil || (intent.Version == 2 && !intent.LicenseOwned) {
 		return intent, true, false, ErrIntentNeedsReview
 	}
 	profile, err := i.config.profile()
@@ -148,20 +151,21 @@ func (i *Installer) removalCheck(ctx context.Context, romID int) (installIntent,
 	if err = checkInstalledInventory(root, *intent.Inventory, resuming); err != nil {
 		return intent, true, false, err
 	}
-	license, info, exists, err := pathUnderRoot(intent.DevHDD0, "home", intent.RPCS3User, "exdata", intent.ContentID+".rap")
-	if err != nil {
-		return intent, true, false, err
-	}
-	if !exists {
-		if !resuming {
-			return intent, true, false, ErrIntentNeedsReview
+	for _, license := range intentLicenses(intent) {
+		if !license.Owned {
+			continue
 		}
-	} else {
-		if receipt.Phase == "removed" || !info.Mode().IsRegular() || info.Size() != 16 {
-			return intent, true, false, ErrIntentNeedsReview
+		p, info, exists, err := pathUnderRoot(intent.DevHDD0, "home", intent.RPCS3User, "exdata", license.ContentID+".rap")
+		if err != nil {
+			return intent, true, false, err
 		}
-		sum, err := sha256File(license, 16)
-		if err != nil || sum != intent.RAPSHA256 {
+		if !exists {
+			if !resuming {
+				return intent, true, false, ErrIntentNeedsReview
+			}
+			continue
+		}
+		if receipt.Phase == "removed" || !info.Mode().IsRegular() || info.Size() != 16 || !imageMatches(p, installedFile{Size: 16, SHA256: license.SHA256}) {
 			return intent, true, false, ErrIntentNeedsReview
 		}
 	}
@@ -205,22 +209,24 @@ func (i *Installer) Remove(ctx context.Context, romID int) (bool, error) {
 	if err = ctx.Err(); err != nil {
 		return true, err
 	}
-	license, info, exists, err := pathUnderRoot(intent.DevHDD0, "home", intent.RPCS3User, "exdata", intent.ContentID+".rap")
-	if err != nil {
-		return true, err
-	}
-	if exists {
-		if !info.Mode().IsRegular() {
-			return true, ErrIntentNeedsReview
+	for _, license := range intentLicenses(intent) {
+		if !license.Owned {
+			continue
 		}
-		sum, err := sha256File(license, 16)
-		if err != nil || sum != intent.RAPSHA256 {
-			return true, ErrIntentNeedsReview
-		}
-		if err = os.Remove(license); err != nil {
+		p, info, exists, err := pathUnderRoot(intent.DevHDD0, "home", intent.RPCS3User, "exdata", license.ContentID+".rap")
+		if err != nil {
 			return true, err
 		}
-		if err = syncDirectory(filepath.Dir(license)); err != nil {
+		if !exists {
+			continue
+		}
+		if !info.Mode().IsRegular() || info.Size() != 16 || !imageMatches(p, installedFile{Size: 16, SHA256: license.SHA256}) {
+			return true, ErrIntentNeedsReview
+		}
+		if err = os.Remove(p); err != nil {
+			return true, err
+		}
+		if err = syncDirectory(filepath.Dir(p)); err != nil {
 			return true, err
 		}
 	}
@@ -235,10 +241,10 @@ func (i *Installer) restartAfterRemoved(intent installIntent, bundle Bundle, pro
 	if receipt.Phase != "removed" {
 		return false, ErrIntentNeedsReview
 	}
-	if intent.Version != 2 || intent.DevHDD0 != profile.DevHDD0 || !sameIntentBundle(intent, intent.ROMID, bundle, profile.UserID) {
+	if (intent.Version != 2 && intent.Version != 3) || intent.DevHDD0 != profile.DevHDD0 || !sameIntentBundle(intent, intent.ROMID, bundle, profile.UserID) {
 		return false, ErrIntentNeedsReview
 	}
-	for _, parts := range [][]string{{"game", intent.TitleID}, {"home", intent.RPCS3User, "exdata", intent.ContentID + ".rap"}} {
+	for _, parts := range removedNativePaths(intent) {
 		_, _, exists, err := pathUnderRoot(intent.DevHDD0, parts...)
 		if err != nil {
 			return false, err
@@ -317,10 +323,10 @@ func (i *Installer) completePendingRestart(romID int, bundle Bundle, profile rpc
 		return ErrIntentNeedsReview
 	}
 	intent := marker.Intent
-	if intent.Version != 2 || intent.Phase != intentVerified || !validOwnedIntent(intent) || !validIntentTimestamps(intent) || intent.DevHDD0 != profile.DevHDD0 || !sameIntentBundle(intent, romID, bundle, profile.UserID) || marker.Removal.Version != 1 || marker.Removal.ROMID != romID || marker.Removal.TitleID != intent.TitleID || marker.Removal.Phase != "removed" || marker.Removal.OwnershipSHA256 != ownershipHash(intent) {
+	if (intent.Version != 2 && intent.Version != 3) || intent.Phase != intentVerified || !validOwnedIntent(intent) || !validIntentTimestamps(intent) || intent.DevHDD0 != profile.DevHDD0 || !sameIntentBundle(intent, romID, bundle, profile.UserID) || marker.Removal.Version != 1 || marker.Removal.ROMID != romID || marker.Removal.TitleID != intent.TitleID || marker.Removal.Phase != "removed" || marker.Removal.OwnershipSHA256 != ownershipHash(intent) {
 		return ErrIntentNeedsReview
 	}
-	for _, parts := range [][]string{{"game", intent.TitleID}, {"home", intent.RPCS3User, "exdata", intent.ContentID + ".rap"}} {
+	for _, parts := range removedNativePaths(intent) {
 		_, _, exists, err := pathUnderRoot(intent.DevHDD0, parts...)
 		if err != nil {
 			return err

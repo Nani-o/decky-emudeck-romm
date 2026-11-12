@@ -91,3 +91,38 @@ func asciiUpperAlphaNumeric(value string) bool {
 	}
 	return value != ""
 }
+
+// PS3PackageKind is the explicit RomM attachment role. Package metadata is
+// independently checked before the role can authorize a native installation.
+type PS3PackageKind string
+
+const (
+	PS3PackageUpdate PS3PackageKind = "update"
+	PS3PackageDLC    PS3PackageKind = "dlc"
+)
+
+// PS3ExtraPackage is one server attachment, privately unpacked to one PKG and
+// its optional matching RAP. SourceFileID is recorded for idempotent retries.
+type PS3ExtraPackage struct {
+	SourceFileID int
+	Directory    string
+	Kind         PS3PackageKind
+}
+
+// PS3ExtrasRequest binds explicit attachments to an independently identified
+// base title. BaseSFOPath is required for disc bases and never written to.
+type PS3ExtrasRequest struct {
+	ROMID       int
+	TitleID     string
+	DiscBase    bool
+	BaseSFOPath string
+	Packages    []PS3ExtraPackage
+}
+
+// PS3ExtrasResult reports the source attachments covered by the durable native
+// receipt. Inputs are safe to clean only after the caller also saves ownership.
+type PS3ExtrasResult struct {
+	TitleID              string
+	AppliedSourceFileIDs []int
+	VerifiedAt           time.Time
+}

@@ -19,6 +19,13 @@ type PS3PackageInstaller interface {
 	Install(ctx context.Context, romID int, stagingDir string) (domain.PS3InstallResult, error)
 }
 
+// PS3BasePreparer can identify a base while an extras overlay is pending. It
+// does not complete that overlay and is used only by the extras pipeline, which
+// must always call InstallExtras before publishing or advancing ownership.
+type PS3BasePreparer interface {
+	PreparedBase(context.Context, int, string) (domain.PS3InstallResult, bool, error)
+}
+
 // PS3PackageRemover owns native title removal separately from ROM files.
 type PS3PackageRemover interface {
 	CheckRemoval(context.Context, int) (bool, error)
@@ -38,6 +45,20 @@ func nativePS3Shortcut(rec domain.OwnedROM) bool {
 	return false
 }
 
+// Disc games can own native update/DLC overlays without a desktop shortcut.
+// Keep the lookup bounded to PS3 records: an unrelated malformed PS3 receipt
+// must never block deletion of a GBA or other platform's game.
+func nativePS3Candidate(rec domain.OwnedROM) bool {
+	for _, f := range rec.Files {
+		for dir := filepath.Dir(f.Path); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+			if filepath.Base(dir) == "ps3" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // InstallPS3PackagesWith enables the native package path without changing disc
 // directory installation or save synchronization.
 func (d *Downloads) InstallPS3PackagesWith(installer PS3PackageInstaller) { d.ps3 = installer }
@@ -46,6 +67,14 @@ func (d *Downloads) InstallPS3PackagesWith(installer PS3PackageInstaller) { d.ps
 // produce one owned shortcut, only after the native installer verified its
 // title and license. Inputs never appear as playable entries in roms/.
 func (d *Downloads) stagePS3Package(ctx context.Context, j *job, rom domain.ROM, staged []stagedFile, staging, dir string, old []domain.PlacedFile) ([]stagedFile, string, error) {
+	return d.stagePS3PackageBase(ctx, j, rom, staged, staging, dir, old, false)
+}
+
+func (d *Downloads) stagePS3PackageForExtras(ctx context.Context, j *job, rom domain.ROM, staged []stagedFile, staging, dir string, old []domain.PlacedFile) ([]stagedFile, string, error) {
+	return d.stagePS3PackageBase(ctx, j, rom, staged, staging, dir, old, true)
+}
+
+func (d *Downloads) stagePS3PackageBase(ctx context.Context, j *job, rom domain.ROM, staged []stagedFile, staging, dir string, old []domain.PlacedFile, allowPrepared bool) ([]stagedFile, string, error) {
 	if isPS3Disc(staged) {
 		return staged, "", nil
 	}
@@ -103,7 +132,17 @@ func (d *Downloads) stagePS3Package(ctx context.Context, j *job, rom domain.ROM,
 	// A cancelled native install can have changed NAND. Its source and journal
 	// must survive rather than looking like a cancelled ordinary transfer.
 	j.retainStaging = true
-	result, err := d.ps3.Install(ctx, j.ROMID, private)
+	var result domain.PS3InstallResult
+	var err error
+	prepared := false
+	if allowPrepared {
+		if preparer, ok := d.ps3.(PS3BasePreparer); ok {
+			result, prepared, err = preparer.PreparedBase(ctx, j.ROMID, private)
+		}
+	}
+	if err == nil && !prepared {
+		result, err = d.ps3.Install(ctx, j.ROMID, private)
+	}
 	if err != nil {
 		return nil, "", fmt.Errorf("RPCS3 package installation failed; private staging was retained for review: %w", err)
 	}

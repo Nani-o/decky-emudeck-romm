@@ -170,7 +170,7 @@ func (d *Downloads) deleteGame(ctx context.Context, id int, withSaves bool) erro
 	native := nativePS3Shortcut(rec)
 	remover, canRemove := d.ps3.(PS3PackageRemover)
 	nativeOwned := false
-	if native && canRemove {
+	if nativePS3Candidate(rec) && canRemove {
 		nativeOwned, err = remover.CheckRemoval(ctx, id)
 		if err != nil {
 			return err

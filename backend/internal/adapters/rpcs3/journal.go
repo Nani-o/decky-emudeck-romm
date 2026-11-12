@@ -25,6 +25,9 @@ var ErrIntentNeedsReview = errors.New("an earlier PS3 install needs review; auto
 
 type installIntent struct {
 	Version       int                 `json:"version"`
+	BaseKind      string              `json:"base_kind,omitempty"`
+	Extras        []extraReceipt      `json:"extras,omitempty"`
+	ExtraLicenses []extraLicense      `json:"extra_licenses,omitempty"`
 	DevHDD0       string              `json:"dev_hdd0,omitempty"`
 	LicenseOwned  bool                `json:"license_owned,omitempty"`
 	EntryCount    uint32              `json:"entry_count,omitempty"`
@@ -66,9 +69,9 @@ func readIntent(directory, titleID string) (installIntent, bool, error) {
 		return installIntent{}, false, fmt.Errorf("read PS3 install intent: %w", err)
 	}
 	_, identityErr := domain.ParsePS3Identity(intent.ContentID, intent.TitleID)
-	if (intent.Version != 1 && intent.Version != 2) || !validOwnedIntent(intent) || intent.TitleID != titleID || !validIntentPhase(intent.Phase) ||
+	if (intent.Version != 1 && intent.Version != 2 && intent.Version != 3) || !validOwnedIntent(intent) || intent.TitleID != titleID || !validIntentPhase(intent.Phase) ||
 		intent.ROMID <= 0 || identityErr != nil || len(intent.RPCS3User) != 8 || !asciiNumeric(intent.RPCS3User) ||
-		!validSHA256(intent.PackageSHA256) || !validSHA256(intent.RAPSHA256) || len(intent.Reason) > 2048 ||
+		!validSHA256(intent.PackageSHA256) || (!validSHA256(intent.RAPSHA256) && !(intent.Version == 3 && intent.BaseKind == "disc" && intent.RAPSHA256 == "")) || len(intent.Reason) > 2048 ||
 		intent.StartedAt.IsZero() || !validIntentTimestamps(intent) {
 		return installIntent{}, false, fmt.Errorf("PS3 install intent is incomplete or unsupported")
 	}
@@ -245,6 +248,9 @@ func validIntentTimestamps(intent installIntent) bool {
 }
 
 func validOwnedIntent(intent installIntent) bool {
+	if intent.Version == 3 {
+		return validExtendedIntent(intent)
+	}
 	if intent.Version == 1 {
 		return intent.DevHDD0 == "" && !intent.LicenseOwned && intent.EntryCount == 0 && intent.Inventory == nil
 	}

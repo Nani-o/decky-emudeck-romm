@@ -58,7 +58,7 @@ settings and game database.
 
 For a source build, follow [DEVELOPMENT.md](DEVELOPMENT.md) and package this checkout with
 `make package`. Installing an upstream release alone does not install this fork's additions. The
-default RPC protocol is unchanged; the backend version is `0.5.0-nani.4`.
+default RPC protocol is unchanged; the backend version is `0.5.0-nani.5`.
 
 Switch downloads select the latest applicable update by its numeric package version and title ID,
 while keeping all DLC. Older updates remain available on RomM and are omitted from the Deck
@@ -78,18 +78,29 @@ qualified title binding keep local saves; they do not acquire a guessed save map
 bindings and sync conflicts are reported separately. These additions require runtime validation
 before being treated as supported on a particular device.
 
-PS3 base-game bundles containing one retail PKG and its matching RAP are installed through the
-existing RPCS3 AppImage. Firmware and the active user must already be configured, and RPCS3 must
-be closed. Installation verifies the native title before publishing an ES-DE desktop shortcut.
-After ownership is saved, the downloaded archive and extracted PKG are removed from the Deck;
-the original stays on RomM. Failed installs retain private staging for diagnosis.
+PS3 base-game bundles containing one retail PKG and its matching RAP use the existing RPCS3
+AppImage. Explicit RomM `update` and `dlc` attachments use the native package installer as well.
+Each attachment is a raw PKG with its required RAP, or a single-PKG archive with an optional RAP.
+Firmware and the active RPCS3 user must already exist, and RPCS3 must be closed. Disc-directory
+games retain their normal launcher; embedded demo packages and game assets are not treated as addons.
 
-Deleting a managed package removes its recorded native title, its own license and the shortcut,
-while preserving saves, trophies, firmware and other titles. Removal stops if the pinned native
-installation has changed or contains unrecorded files. An interrupted removal can be retried,
-and a removed package can be installed again. Legacy native installs are not automatically
-adopted. Disc-directory games retain their normal launcher; separate PS3 updates/DLC and
-multi-package bundles are not supported by this installer.
+Package headers and the independently identified base title bind each addon to its TitleID.
+All supplied updates run in verified APP_VER order before DLC; PS3 patches may require earlier
+versions, so this does not use Switch's latest-only selection. Existing unchanged base files are
+kept when only attachments change. Replacing/removing an installed package or base requires
+uninstall/reinstall; ambiguous versions, wrong TitleIDs and unsupported package roles stop safely.
+
+Attachment extraction uses a temporary private config/cache/NAND. Verified title files are then
+placed with an inventory and resumable transaction receipt. Completed native attachment work is removed when its native receipt commits. After installation
+and saved app ownership succeed, the Deck's archive/PKG staging is removed; originals stay on RomM. Failures keep the source data needed for retry and never report a ready game.
+
+Deleting a managed PSN game or disc addon installation removes its owned native title files,
+newly created licenses and ROM files/shortcut. Saves, trophies, firmware, borrowed identical
+licenses and other titles are preserved. Changed/unrecorded native files block removal, and an
+interrupted operation can be retried. Legacy unrecorded native installs are not adopted.
+DLC replacing the root PARAM.SFO or USRDIR/EBOOT.BIN is refused. Standalone EDAT/license-only
+packages, cross-TitleID DLC aliases, split PKGs and multi-PKG attachment archives are not claimed. Synthetic native package tests qualify
+installation and ownership mechanics; they do not qualify commercial DLC entitlement or gameplay.
 
 The upstream [getting started guide](docs/getting-started.md) explains the original setup and
 sign-in flow; its release download links install the stock upstream plugin.

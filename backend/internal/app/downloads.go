@@ -369,7 +369,7 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 	}
 
 	plannedBytes, fileCount := rom.SizeBytes, 0
-	if system.Folder == "switch" {
+	if system.Folder == "switch" || system.Folder == "ps3" {
 		var old *domain.OwnedROM
 		if update {
 			old = &ownedRecord
@@ -388,10 +388,10 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 		return j.Download, nil
 	}
 	need := roomFor(system, rom)
-	if system.Folder == "switch" {
+	if system.Folder == "switch" || system.Folder == "ps3" {
 		need = plannedBytes
 	}
-	if j != nil && system.Folder == "switch" {
+	if j != nil && (system.Folder == "switch" || system.Folder == "ps3") {
 		if j.Total == plannedBytes {
 			need = max(plannedBytes-j.Received, 0)
 		}
@@ -507,6 +507,13 @@ func (d *Downloads) readDownloadPlan(ctx context.Context, rom domain.ROM, system
 		return DownloadPlan{}, err
 	}
 	selected := domain.GameFiles(files)
+	ps3Extras := system.Folder == "ps3" && (domain.PS3HasAttachments(files) || old != nil && domain.PS3HasAttachmentSnapshots(old.Snapshot))
+	if ps3Extras {
+		selected, err = domain.PS3TransferFiles(files, old)
+		if err != nil {
+			return DownloadPlan{}, err
+		}
+	}
 	if system.Folder == "switch" {
 		selected, err = domain.SelectContentFiles(files)
 		if err != nil {
@@ -520,7 +527,11 @@ func (d *Downloads) readDownloadPlan(ctx context.Context, rom domain.ROM, system
 	if name == "" {
 		name = rom.Name
 	}
-	if _, err := domain.PlanLayout(system, name, selected); err != nil {
+	layoutFiles := selected
+	if ps3Extras {
+		layoutFiles = domain.GameFiles(files)
+	}
+	if _, err := domain.PlanLayout(system, name, layoutFiles); err != nil {
 		return DownloadPlan{}, err
 	}
 	if old != nil && system.Folder == "switch" {
@@ -998,6 +1009,9 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	files, err := server.ROMFiles(ctx, j.ROMID)
 	if err != nil {
 		return d.conn.observe(*in, err)
+	}
+	if system.Folder == "ps3" && (domain.PS3HasAttachments(files) || j.update && domain.PS3HasAttachmentSnapshots(oldRecord.Snapshot)) {
+		return d.conn.observe(*in, d.downloadPS3Content(ctx, j, rom, system, dir, files, oldRecord, server))
 	}
 	game := domain.GameFiles(files)
 	manifest := game

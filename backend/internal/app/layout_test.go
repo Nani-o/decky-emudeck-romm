@@ -142,7 +142,7 @@ func TestPS3Folder(t *testing.T) {
 	f.serveSet(11,
 		gameFile{"PS3_GAME/PARAM.SFO", "", "sfo"},
 		gameFile{"PS3_GAME/USRDIR/EBOOT.BIN", "", "eboot"},
-		gameFile{"update/patch.pkg", "update", "pkg"},
+		gameFile{"manual/booklet.pdf", "manual", "pdf"},
 	)
 	f.installed(t, 11)
 	ps3 := filepath.Join(f.root, "roms", "ps3")
