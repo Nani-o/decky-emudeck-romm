@@ -58,13 +58,15 @@ settings and game database.
 
 For a source build, follow [DEVELOPMENT.md](DEVELOPMENT.md) and package this checkout with
 `make package`. Installing an upstream release alone does not install this fork's additions. The
-default RPC protocol is unchanged; the backend version is `0.5.0-nani.2`.
+default RPC protocol is unchanged; the backend version is `0.5.0-nani.3`.
 
 Switch downloads select the latest applicable update by its numeric package version and title ID,
 while keeping all DLC. Older updates remain available on RomM and are omitted from the Deck
 manifest. Updating an existing managed game removes superseded owned files without downloading
 unchanged base files again. Canonical `[TITLE_ID][vVERSION]` filename tags identify packages;
 unidentified or ambiguous update sets stop before installation instead of choosing arbitrarily.
+Before downloading, game details preview the selected transfer size and source-file count using
+the same read-only plan as the queue. A preview never queues or installs a game.
 The download queue reports the selected transfer size and file count, then shows separate
 extraction and installation phases. Cancelling extraction stays pending until it actually stops;
 the short final file placement cannot be cancelled.

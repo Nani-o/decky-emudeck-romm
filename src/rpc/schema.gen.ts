@@ -126,6 +126,7 @@ export interface Methods {
   get_cover: Method<GetCoverParams, Cover>;
   search_games: Method<SearchGamesParams, SearchGamesResult>;
   download_game: Method<DownloadGameParams, DownloadItem>;
+  get_download_plan: Method<GetDownloadPlanParams, DownloadPlan>;
   cancel_download: Method<CancelDownloadParams, CancelDownloadResult>;
   list_downloads: Method<ListDownloadsParams, ListDownloadsResult>;
   delete_games: Method<DeleteGamesParams, DeleteGamesResult>;
@@ -1065,6 +1066,20 @@ export interface OwnershipEvent {
  */
 export interface DownloadGameParams {
   id: number /* int */;
+}
+/**
+ * GetDownloadPlanParams names a game's read-only transfer preview.
+ */
+export interface GetDownloadPlanParams {
+  id: number /* int */;
+}
+/**
+ * DownloadPlan describes selected source bytes, not extracted disk usage.
+ * An update may remove old owned content with no source transfer at all.
+ */
+export interface DownloadPlan {
+  fileCount: number /* int */;
+  totalBytes: number /* int64 */;
 }
 /**
  * CancelDownloadParams names the download to cancel, or the failed download to dismiss. Either

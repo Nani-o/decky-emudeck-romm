@@ -4,6 +4,7 @@ import type { CSSProperties, ReactNode } from 'react'
 import { formatSize } from '../catalog'
 import { Cover } from '../covers'
 import { isTransferring, percent } from '../downloadProgress'
+import { downloadPlanText } from '../downloadPlan'
 import { ErrorBox, mono, muted } from '../setup/common'
 import {
   BiosSection,
@@ -69,8 +70,18 @@ function Detail({ label, children }: { label: string; children: ReactNode }) {
 
 /** A game's full-screen page: its cover, what it is, where it stands, and what can be done with it. */
 export function GameHero({ id }: { id: number }) {
-  const { game, download, state, stateText, actions, notice, removed, searchNote, error } =
-    useGameDetail(id)
+  const {
+    game,
+    download,
+    downloadPlan,
+    state,
+    stateText,
+    actions,
+    notice,
+    removed,
+    searchNote,
+    error,
+  } = useGameDetail(id)
 
   if (!game) {
     return (
@@ -131,6 +142,7 @@ export function GameHero({ id }: { id: number }) {
             />
           </div>
         )}
+        {downloadPlan && <div style={muted}>{downloadPlanText(downloadPlan, formatSize)}</div>}
         {download && download.state !== 'failed' && (
           <div style={muted}>{downloadTransferText(download)}</div>
         )}
@@ -167,7 +179,7 @@ export function GameHero({ id }: { id: number }) {
               <span style={mono}>{p}</span>
             </Detail>
           ))}
-          <Detail label="File">
+          <Detail label={game.multiFile ? 'Base game folder' : 'Base game file'}>
             <span style={mono}>{game.fileName}</span>
             {game.multiFile && <span style={muted}> · a folder of several files</span>}
           </Detail>

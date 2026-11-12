@@ -480,11 +480,8 @@ func TestAmbiguousLegacySwitchOwnershipFailsWithoutTouchingFiles(t *testing.T) {
 	if err := f.downloads.CheckUpdates(ctx, []int{13}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.downloads.Queue(ctx, 13); err != nil {
-		t.Fatal(err)
-	}
-	if u := f.end(t, 13); u.State != domain.StateFailed || kindOf(u.Problem) != domain.KindChangedOnDisk {
-		t.Fatalf("ambiguous ownership wasn't refused: %+v", u)
+	if _, err := f.downloads.Queue(ctx, 13); kindOf(err) != domain.KindChangedOnDisk {
+		t.Fatalf("ambiguous ownership wasn't refused before queueing: %v", err)
 	}
 	if readFile(t, basePath) != "legacy base" || readFile(t, extraPath) != "ambiguous legacy extra" || len(f.server.started) != 0 {
 		t.Fatal("ambiguous update touched data or started a download")

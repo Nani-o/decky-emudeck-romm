@@ -233,3 +233,10 @@ func TestRoutesCoverSchema(t *testing.T) {
 		t.Errorf("%d handlers registered for %d schema methods", len(s.handlers), methods.NumField())
 	}
 }
+
+func TestDownloadPlanZeroIsExplicit(t *testing.T) {
+	raw, err := json.Marshal(schema.DownloadPlan{})
+	if err != nil || string(raw) != `{"fileCount":0,"totalBytes":0}` {
+		t.Fatalf("remove-only preview must remain a known zero plan: %s %v", raw, err)
+	}
+}

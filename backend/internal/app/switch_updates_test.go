@@ -97,6 +97,10 @@ func TestSwitchRetiresHistoricalOwnedPatchWithoutDownloadingAnything(t *testing.
 	if change := f.ownershipChange(t); change.State != domain.StateUpdate {
 		t.Fatalf("change %+v", change)
 	}
+	plan, planErr := assertPreviewReadOnly(t, f, 13)
+	if planErr != nil || plan.FileCount != 0 || plan.TotalBytes != 0 {
+		t.Fatalf("remove-only preview %+v err=%v", plan, planErr)
+	}
 	queued, err := f.downloads.Queue(ctx, 13)
 	if err != nil || queued.Total != 0 || queued.FileCount != 0 {
 		t.Fatalf("remove-only queue %+v err=%v", queued, err)
@@ -199,6 +203,10 @@ func TestSwitchChangedUpdateVolumeReplacesWholeCohortWithoutBaseTransfer(t *test
 	}
 	if change := f.ownershipChange(t); change.State != domain.StateUpdate {
 		t.Fatalf("change %+v", change)
+	}
+	plan, planErr := assertPreviewReadOnly(t, f, 13)
+	if planErr != nil || plan.FileCount != 2 || plan.TotalBytes != int64(len(first)+len(newSecond)) {
+		t.Fatalf("cohort preview %+v err=%v", plan, planErr)
 	}
 	queued, err := f.downloads.Queue(ctx, 13)
 	if err != nil || queued.FileCount != 2 || queued.Total != int64(len(first)+len(newSecond)) {

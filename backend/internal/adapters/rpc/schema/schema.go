@@ -100,6 +100,7 @@ type Methods struct {
 	GetCover            Method[GetCoverParams, Cover]                                `json:"get_cover"`
 	SearchGames         Method[SearchGamesParams, SearchGamesResult]                 `json:"search_games"`
 	DownloadGame        Method[DownloadGameParams, DownloadItem]                     `json:"download_game"`
+	GetDownloadPlan     Method[GetDownloadPlanParams, DownloadPlan]                  `json:"get_download_plan"`
 	CancelDownload      Method[CancelDownloadParams, CancelDownloadResult]           `json:"cancel_download"`
 	ListDownloads       Method[ListDownloadsParams, ListDownloadsResult]             `json:"list_downloads"`
 	DeleteGames         Method[DeleteGamesParams, DeleteGamesResult]                 `json:"delete_games"`
@@ -849,6 +850,18 @@ type OwnershipEvent struct {
 // all there; cancelling it leaves the old version as it was.
 type DownloadGameParams struct {
 	ID int `json:"id"`
+}
+
+// GetDownloadPlanParams names a game's read-only transfer preview.
+type GetDownloadPlanParams struct {
+	ID int `json:"id"`
+}
+
+// DownloadPlan describes selected source bytes, not extracted disk usage.
+// An update may remove old owned content with no source transfer at all.
+type DownloadPlan struct {
+	FileCount  int   `json:"fileCount"`
+	TotalBytes int64 `json:"totalBytes"`
 }
 
 // CancelDownloadParams names the download to cancel, or the failed download to dismiss. Either

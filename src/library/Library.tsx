@@ -53,6 +53,7 @@ import {
 import { useConnection } from '../connection'
 import { Cover } from '../covers'
 import { cancelDownload, type Downloads, percent, useDownloads } from '../downloads'
+import { type DownloadPlanPreview, downloadPlanText, requestDownloadPlan } from '../downloadPlan'
 import {
   canCancel,
   type Download,
@@ -1466,6 +1467,8 @@ export interface GameDetail {
   game: Game | null
   /** The game's download, while it's in the queue. */
   download?: Download
+  /** Selected source files and transfer size before Download or Update is queued. */
+  downloadPlan: DownloadPlanPreview | null
   /** The game's state, its download's while it has one. */
   state?: GameState
   /** The state as the page says it, with a running download's progress. */
@@ -1530,10 +1533,33 @@ function useGameSearch(id: number, platformId: number | undefined) {
   return status?.romId === id ? status : null
 }
 
+/** Resolve the same manifest the queue will use, without delaying the Download action. */
+function useDownloadPlan(id: number, state: GameState | undefined, reload: number) {
+  const [result, setResult] = useState<{
+    key: string
+    preview: DownloadPlanPreview
+  } | null>(null)
+  const eligible = state === 'on_romm' || state === 'update_available'
+  const key = `${id}:${state}:${reload}`
+
+  useEffect(() => {
+    if (!eligible) return
+    return requestDownloadPlan(
+      () => call('get_download_plan', { id }),
+      (preview) => setResult({ key, preview }),
+      (err) => asRpcError(err).message,
+    )
+  }, [eligible, id, key])
+
+  if (!eligible) return null
+  return result?.key === key ? result.preview : { state: 'loading' as const }
+}
+
 /** A game and what can be done with it, both pages' shared view of it. */
 export function useGameDetail(id: number): GameDetail {
   const downloads = useDownloads()
-  const [game, setGame] = useState<Game | null>(null)
+  const [loadedGame, setGame] = useState<Game | null>(null)
+  const game = loadedGame?.id === id ? loadedGame : null
   const [error, setError] = useState<RpcError | null>(null)
   const [busy, setBusy] = useState(false)
   const search = useGameSearch(id, game?.platformId)
@@ -1541,11 +1567,23 @@ export function useGameDetail(id: number): GameDetail {
 
   // Reloads when a download ends, which may be this game's, and when a search for it ends.
   useEffect(() => {
-    call('get_game', { id }).then(setGame, (err: unknown) => setError(asRpcError(err)))
+    let current = true
+    call('get_game', { id }).then(
+      (game) => {
+        if (current) setGame(game)
+      },
+      (err: unknown) => {
+        if (current) setError(asRpcError(err))
+      },
+    )
+    return () => {
+      current = false
+    }
   }, [id, downloads.ended, searching])
 
   const download = downloads.items.find((d) => d.id === id)
   const state = download?.state ?? game?.state
+  const downloadPlan = useDownloadPlan(id, game?.removed ? undefined : state, downloads.ended)
   // RomM has nothing left to compare a removed game's file with.
   const check = useOnDeckCheck(id, game?.removed ? undefined : state, downloads.ended)
 
@@ -1691,7 +1729,18 @@ export function useGameDetail(id: number): GameDetail {
   } else if (download) stateText = downloadLabel(download)
   else if (game?.removed) stateText = `${stateText} · Removed from RomM`
 
-  return { game, download, state, stateText, actions, notice, removed, searchNote, error }
+  return {
+    game,
+    download,
+    downloadPlan,
+    state,
+    stateText,
+    actions,
+    notice,
+    removed,
+    searchNote,
+    error,
+  }
 }
 
 const quickButton: CSSProperties = { flex: 1, minWidth: 0 }
@@ -1744,8 +1793,18 @@ function QuickActions({ id, syncs }: { id: number; syncs: boolean }) {
 }
 
 export function GameView({ id, onBack }: { id: number; onBack: () => void }) {
-  const { game, download, state, stateText, actions, notice, removed, searchNote, error } =
-    useGameDetail(id)
+  const {
+    game,
+    download,
+    downloadPlan,
+    state,
+    stateText,
+    actions,
+    notice,
+    removed,
+    searchNote,
+    error,
+  } = useGameDetail(id)
 
   return (
     <PanelSection title={game?.name ?? 'Game'}>
@@ -1786,6 +1845,11 @@ export function GameView({ id, onBack }: { id: number; onBack: () => void }) {
           )}
           <BiosSection platformId={game.platformId} nudge />
           {showsSaves(game, state) && <SavesSection id={game.id} />}
+          {downloadPlan && (
+            <PanelSectionRow>
+              <Field label="Download">{downloadPlanText(downloadPlan, formatSize)}</Field>
+            </PanelSectionRow>
+          )}
           {download && download.state !== 'failed' && <DownloadDetail d={download} />}
           {state === 'failed' && download?.problem && (
             <PanelSectionRow>
@@ -1824,7 +1888,7 @@ export function GameView({ id, onBack }: { id: number; onBack: () => void }) {
           )}
           <PanelSectionRow>
             <Field
-              label="File"
+              label={game.multiFile ? 'Base game folder' : 'Base game file'}
               description={game.multiFile ? 'A folder of several files' : undefined}
             >
               <span style={{ wordBreak: 'break-all' }}>{game.fileName}</span>

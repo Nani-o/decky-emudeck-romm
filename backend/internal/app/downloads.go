@@ -321,10 +321,11 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 	if d.store == nil {
 		return Download{}, d.problem
 	}
-	if in, err := d.conn.activeSignIn(); err != nil || in == nil {
-		if err != nil {
-			return Download{}, err
-		}
+	in, err := d.conn.activeSignIn()
+	if err != nil {
+		return Download{}, err
+	}
+	if in == nil {
 		return Download{}, errNotSignedIn
 	}
 	rom, platform, err := d.lookup(ctx, id)
@@ -367,34 +368,15 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 
 	plannedBytes, fileCount := rom.SizeBytes, 0
 	if system.Folder == "switch" {
-		// Catalog sizes/counts only describe base files. Resolve the selected patch,
-		// DLC and, for updates, the actual delta before showing a queued transfer.
-		in, signErr := d.conn.activeSignIn()
-		if signErr != nil {
-			return Download{}, signErr
-		}
-		if in == nil {
-			return Download{}, errNotSignedIn
-		}
-		files, readErr := d.dial(in.Server, in.Token).ROMFiles(ctx, id)
-		if readErr != nil {
-			return Download{}, d.conn.observe(*in, readErr)
-		}
-		selected, selectErr := domain.SelectContentFiles(files)
-		if selectErr != nil {
-			return Download{}, selectErr
-		}
+		var old *domain.OwnedROM
 		if update {
-			selected, _ = domain.ChangedContent(ownedRecord.Snapshot, selected)
+			old = &ownedRecord
 		}
-		plannedBytes = 0
-		fileCount = len(selected)
-		for _, f := range selected {
-			if f.SizeBytes < 0 || plannedBytes > (1<<63-1)-f.SizeBytes {
-				return Download{}, &domain.Error{Kind: domain.KindCantDownload, Message: "RomM reported an invalid Switch file size."}
-			}
-			plannedBytes += f.SizeBytes
+		plan, err := d.readDownloadPlan(ctx, rom, system, old)
+		if err != nil {
+			return Download{}, d.conn.observe(*in, err)
 		}
+		plannedBytes, fileCount = plan.TotalBytes, plan.FileCount
 	}
 
 	d.mu.Lock()
@@ -450,6 +432,161 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 	}
 	d.pump()
 	return queued, nil
+}
+
+// DownloadPlan describes the selected source transfer. It deliberately does not
+// estimate extracted disk usage or reserve space in the download queue.
+type DownloadPlan struct {
+	FileCount  int
+	TotalBytes int64
+}
+
+// Plan previews what Queue will transfer without queueing, reserving space,
+// changing ownership or writing any local file. Existing games are previewed
+// only when their native ownership state offers an update.
+func (d *Downloads) Plan(ctx context.Context, id int) (DownloadPlan, error) {
+	if d.store == nil {
+		return DownloadPlan{}, d.problem
+	}
+	in, err := d.conn.activeSignIn()
+	if err != nil {
+		return DownloadPlan{}, err
+	}
+	if in == nil {
+		return DownloadPlan{}, errNotSignedIn
+	}
+	rom, platform, err := d.lookup(ctx, id)
+	if err != nil {
+		return DownloadPlan{}, err
+	}
+	if rom.Removed {
+		return DownloadPlan{}, errRemoved
+	}
+	system, _, err := d.targetDir(rom, platform)
+	if err != nil {
+		return DownloadPlan{}, err
+	}
+	rec, owned, err := d.store.Owned(ctx, id)
+	if err != nil {
+		return DownloadPlan{}, err
+	}
+	var old *domain.OwnedROM
+	if owned {
+		updates, err := d.store.UpdateIDs(ctx)
+		if err != nil {
+			return DownloadPlan{}, err
+		}
+		if !slices.Contains(updates, id) {
+			return DownloadPlan{}, &domain.Error{Kind: domain.KindInvalidInput, Message: "That game is already on this Deck."}
+		}
+		old = &rec
+	} else if path, exists, err := d.occupant(ctx, rom, platform); err != nil {
+		return DownloadPlan{}, err
+	} else if exists {
+		return DownloadPlan{}, &domain.Error{Kind: domain.KindTargetExists, Message: fmt.Sprintf("%s is already on this Deck. Adopt it or link it to RomM before downloading.", filepath.Base(path))}
+	}
+	return d.readDownloadPlan(ctx, rom, system, old)
+}
+
+// readDownloadPlan is shared by the read-only preview and Switch Queue. Both
+// select precisely the same latest package, DLC, delta and complete RAR cohorts.
+// Server errors are returned without observe(): a preview must never clear or
+// rewrite the native sign-in as a side effect of inspecting transfer metadata.
+func (d *Downloads) readDownloadPlan(ctx context.Context, rom domain.ROM, system domain.System, old *domain.OwnedROM) (DownloadPlan, error) {
+	in, err := d.conn.activeSignIn()
+	if err != nil {
+		return DownloadPlan{}, err
+	}
+	if in == nil {
+		return DownloadPlan{}, errNotSignedIn
+	}
+	files, err := d.dial(in.Server, in.Token).ROMFiles(ctx, rom.ID)
+	if err != nil {
+		return DownloadPlan{}, err
+	}
+	selected := domain.GameFiles(files)
+	if system.Folder == "switch" {
+		selected, err = domain.SelectContentFiles(files)
+		if err != nil {
+			return DownloadPlan{}, err
+		}
+		if _, err := multipartRAR(domain.GameFiles(selected)); err != nil {
+			return DownloadPlan{}, err
+		}
+	}
+	name := rom.FileName
+	if name == "" {
+		name = rom.Name
+	}
+	if _, err := domain.PlanLayout(system, name, selected); err != nil {
+		return DownloadPlan{}, err
+	}
+	if old != nil && system.Folder == "switch" {
+		selected, _, err = switchTransferDelta(*old, selected)
+		if err != nil {
+			return DownloadPlan{}, err
+		}
+	}
+	var plan DownloadPlan
+	plan.FileCount = len(selected)
+	for _, f := range selected {
+		if f.SizeBytes < 0 || plan.TotalBytes > (1<<63-1)-f.SizeBytes {
+			return DownloadPlan{}, &domain.Error{Kind: domain.KindCantDownload, Message: "RomM reported an invalid game file size."}
+		}
+		plan.TotalBytes += f.SizeBytes
+	}
+	return plan, nil
+}
+
+// switchTransferDelta is the one update transfer calculation used by preview,
+// Queue and the running downloader. Archive cohorts cannot be partly fetched,
+// and legacy base ownership must retain the downloader's existing safety check.
+func switchTransferDelta(old domain.OwnedROM, files []domain.ROMFile) ([]domain.ROMFile, map[int]bool, error) {
+	_, hasLegacyBase, err := legacySwitchBaseCohort(old)
+	if err != nil {
+		return nil, nil, err
+	}
+	game := domain.GameFiles(files)
+	firstRAR, err := multipartRAR(game)
+	if err != nil {
+		return nil, nil, err
+	}
+	baseChanged := domain.UpdateAvailable(domain.BaseSnapshots(old.Snapshot), files)
+	downloadFiles, touchedIDs := domain.ChangedContent(old.Snapshot, files)
+
+	if hasLegacyBase && baseChanged {
+		selectedBase := map[int]bool{}
+		for _, f := range downloadFiles {
+			if f.IsGame() {
+				selectedBase[f.ID] = true
+			}
+		}
+		for _, f := range game {
+			if !selectedBase[f.ID] {
+				downloadFiles = append(downloadFiles, f)
+			}
+		}
+		for _, snapshot := range domain.BaseSnapshots(old.Snapshot) {
+			touchedIDs[snapshot.FileID] = true
+		}
+	}
+	if firstRAR >= 0 {
+		selected := false
+		for _, f := range downloadFiles {
+			selected = selected || slices.ContainsFunc(game, func(g domain.ROMFile) bool { return g.ID == f.ID })
+		}
+		if selected {
+			for _, f := range game {
+				if !slices.ContainsFunc(downloadFiles, func(selected domain.ROMFile) bool { return selected.ID == f.ID }) {
+					downloadFiles = append(downloadFiles, f)
+				}
+			}
+			for _, f := range game {
+				touchedIDs[f.ID] = true
+			}
+		}
+	}
+	return downloadFiles, touchedIDs, nil
 }
 
 // roomFor is how much room a download of rom needs on its drive.
@@ -925,38 +1062,9 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 			}
 		}
 		var touchedIDs map[int]bool
-		downloadFiles, touchedIDs = domain.ChangedContent(oldRecord.Snapshot, manifest)
-		if hasLegacyBase && baseChanged {
-			selectedBase := map[int]bool{}
-			for _, f := range downloadFiles {
-				if f.IsGame() {
-					selectedBase[f.ID] = true
-				}
-			}
-			for _, f := range game {
-				if !selectedBase[f.ID] {
-					downloadFiles = append(downloadFiles, f)
-				}
-			}
-			for _, snapshot := range domain.BaseSnapshots(oldRecord.Snapshot) {
-				touchedIDs[snapshot.FileID] = true
-			}
-		}
-		if firstRAR >= 0 {
-			selected := false
-			for _, f := range downloadFiles {
-				selected = selected || slices.ContainsFunc(game, func(g domain.ROMFile) bool { return g.ID == f.ID })
-			}
-			if selected {
-				for _, f := range game {
-					if !slices.ContainsFunc(downloadFiles, func(selected domain.ROMFile) bool { return selected.ID == f.ID }) {
-						downloadFiles = append(downloadFiles, f)
-					}
-				}
-				for _, f := range game {
-					touchedIDs[f.ID] = true
-				}
-			}
+		downloadFiles, touchedIDs, err = switchTransferDelta(oldRecord, manifest)
+		if err != nil {
+			return err
 		}
 		selected := make(map[int]bool, len(downloadFiles))
 		for _, f := range downloadFiles {

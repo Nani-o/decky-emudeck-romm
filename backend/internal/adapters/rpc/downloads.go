@@ -17,6 +17,14 @@ func downloadRoutes(s *Server, downloads *app.Downloads) {
 		return toWireDownload(d), nil
 	})
 
+	Register(s, "get_download_plan", func(ctx context.Context, p schema.GetDownloadPlanParams) (schema.DownloadPlan, error) {
+		plan, err := downloads.Plan(ctx, p.ID)
+		if err != nil {
+			return schema.DownloadPlan{}, wireError(err)
+		}
+		return schema.DownloadPlan{FileCount: plan.FileCount, TotalBytes: plan.TotalBytes}, nil
+	})
+
 	Register(s, "cancel_download", func(_ context.Context, p schema.CancelDownloadParams) (schema.CancelDownloadResult, error) {
 		return schema.CancelDownloadResult{Cancelled: downloads.Cancel(p.ID)}, nil
 	})
