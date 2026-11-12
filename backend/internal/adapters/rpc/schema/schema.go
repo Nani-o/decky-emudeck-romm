@@ -895,6 +895,10 @@ type DownloadItem struct {
 	// WaitingForGame is set while the download, transferred, waits for a running game to close
 	// before it's extracted or zipped.
 	WaitingForGame bool `json:"waitingForGame,omitempty"`
+	// Phase separates transfer from extraction and final installation.
+	Phase string `json:"phase,omitempty"`
+	// FileCount is the number of source files selected for this transfer.
+	FileCount int `json:"fileCount,omitempty"`
 }
 
 // DownloadEvent is a change to a download. One that leaves the queue is installed, or on_romm when
@@ -910,6 +914,8 @@ type DownloadEvent struct {
 	Problem        *Error    `json:"problem,omitempty"`
 	Converting     bool      `json:"converting,omitempty"`
 	WaitingForGame bool      `json:"waitingForGame,omitempty"`
+	Phase          string    `json:"phase,omitempty"`
+	FileCount      int       `json:"fileCount,omitempty"`
 }
 
 // PlanDownloadAllParams names the platform, or with Collection set the collection, whose missing

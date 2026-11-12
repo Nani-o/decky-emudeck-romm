@@ -2,6 +2,7 @@ package romm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -30,16 +31,18 @@ type romWithFiles struct {
 }
 
 type wireFile struct {
-	ID            int     `json:"id"`
-	FileName      string  `json:"file_name"`
-	FilePath      string  `json:"file_path"`
-	FullPath      string  `json:"full_path"`
-	FileSizeBytes int64   `json:"file_size_bytes"`
-	Category      *string `json:"category"`
-	LastModified  string  `json:"last_modified"`
-	CRCHash       *string `json:"crc_hash"`
-	MD5Hash       *string `json:"md5_hash"`
-	SHA1Hash      *string `json:"sha1_hash"`
+	ID            int             `json:"id"`
+	FileName      string          `json:"file_name"`
+	FilePath      string          `json:"file_path"`
+	FullPath      string          `json:"full_path"`
+	FileSizeBytes int64           `json:"file_size_bytes"`
+	Category      *string         `json:"category"`
+	LastModified  string          `json:"last_modified"`
+	CRCHash       *string         `json:"crc_hash"`
+	MD5Hash       *string         `json:"md5_hash"`
+	SHA1Hash      *string         `json:"sha1_hash"`
+	TitleID       *string         `json:"title_id"`
+	TitleVersion  json.RawMessage `json:"title_version"`
 }
 
 func (r romWithFiles) files() []domain.ROMFile {
@@ -56,9 +59,27 @@ func (r romWithFiles) files() []domain.ROMFile {
 			CRC:          deref(f.CRCHash),
 			MD5:          deref(f.MD5Hash),
 			SHA1:         deref(f.SHA1Hash),
+			TitleID:      deref(f.TitleID),
+			TitleVersion: rawPackageVersion(f.TitleVersion),
 		})
 	}
 	return out
+}
+
+// RomM versions may be JSON integers or strings, depending on server release.
+func rawPackageVersion(value json.RawMessage) string {
+	if len(value) == 0 || string(value) == "null" {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(value, &text) == nil {
+		return text
+	}
+	var number json.Number
+	if json.Unmarshal(value, &number) == nil {
+		return number.String()
+	}
+	return "invalid"
 }
 
 // ROMFiles returns the files of the ROM with id.

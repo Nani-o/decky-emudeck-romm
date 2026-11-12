@@ -576,11 +576,11 @@ func TestSwitchUpdatePathCollisionPreservesPublishedFiles(t *testing.T) {
 	if err := f.downloads.CheckUpdates(ctx, []int{13}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.downloads.Queue(ctx, 13); err != nil {
-		t.Fatal(err)
+	if _, err := f.downloads.Queue(ctx, 13); kindOf(err) != domain.KindCantDownload {
+		t.Fatalf("ambiguous colliding updates were not rejected before queuing: %v", err)
 	}
-	if u := f.end(t, 13); u.State != domain.StateFailed || kindOf(u.Problem) != domain.KindCantDownload {
-		t.Fatalf("colliding update was accepted: %+v", u)
+	if len(f.downloads.List()) != 0 {
+		t.Fatal("ambiguous content was queued")
 	}
 	if readFile(t, basePath) != "base" || readFile(t, updatePath) != "old update" || len(f.server.started) != 0 {
 		t.Fatal("colliding update altered the installed files")

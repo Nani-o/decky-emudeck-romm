@@ -3,9 +3,15 @@ import type { CSSProperties, ReactNode } from 'react'
 
 import { formatSize } from '../catalog'
 import { Cover } from '../covers'
-import { percent } from '../downloads'
+import { isTransferring, percent } from '../downloadProgress'
 import { ErrorBox, mono, muted } from '../setup/common'
-import { BiosSection, SavesSection, showsSaves, useGameDetail } from './Library'
+import {
+  BiosSection,
+  downloadTransferText,
+  SavesSection,
+  showsSaves,
+  useGameDetail,
+} from './Library'
 
 const hero: CSSProperties = {
   position: 'relative',
@@ -78,9 +84,9 @@ export function GameHero({ id }: { id: number }) {
     game.platformName,
     game.regions.join(', '),
     game.revision,
-    formatSize(game.sizeBytes),
+    `${formatSize(game.sizeBytes)} base game`,
   ]
-  const downloading = download?.state === 'downloading' && !download.converting
+  const downloading = download !== undefined && isTransferring(download)
 
   return (
     <div style={hero}>
@@ -125,10 +131,8 @@ export function GameHero({ id }: { id: number }) {
             />
           </div>
         )}
-        {downloading && download && (
-          <div style={muted}>
-            {formatSize(download.receivedBytes)} of {formatSize(download.totalBytes)}
-          </div>
+        {download && download.state !== 'failed' && (
+          <div style={muted}>{downloadTransferText(download)}</div>
         )}
         {state === 'failed' && download?.problem && <ErrorBox>{download.problem.message}</ErrorBox>}
         {(state === 'installed' || state === 'update_available') && game.installNote && (

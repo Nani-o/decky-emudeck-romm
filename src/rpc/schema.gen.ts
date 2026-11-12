@@ -1126,6 +1126,14 @@ export interface DownloadItem {
    * before it's extracted or zipped.
    */
   waitingForGame?: boolean;
+  /**
+   * Phase separates transfer from extraction and final installation.
+   */
+  phase?: string;
+  /**
+   * FileCount is the number of source files selected for this transfer.
+   */
+  fileCount?: number /* int */;
 }
 /**
  * DownloadEvent is a change to a download. One that leaves the queue is installed, or on_romm when
@@ -1142,6 +1150,8 @@ export interface DownloadEvent {
   problem?: Error;
   converting?: boolean;
   waitingForGame?: boolean;
+  phase?: string;
+  fileCount?: number /* int */;
 }
 /**
  * PlanDownloadAllParams names the platform, or with Collection set the collection, whose missing

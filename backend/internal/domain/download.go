@@ -63,7 +63,10 @@ type ROMFile struct {
 	SizeBytes int64
 	// Category is the kind of file: "game" for the game itself, or manual, dlc, update and so on.
 	// Nested files outside a category folder have none.
-	Category     string
+	Category string
+	// TitleID and TitleVersion are RomM package metadata; TitleVersion is the raw CNMT integer.
+	TitleID      string
+	TitleVersion string
 	LastModified time.Time
 	CRC          string
 	MD5          string
@@ -89,6 +92,16 @@ func (f ROMFile) IsGame() bool {
 // ContentFiles returns Switch files the emulator reads from a game folder: its game, updates and
 // DLC. Other RomM categories remain outside the installed content manifest.
 func ContentFiles(files []ROMFile) []ROMFile {
+	selected, err := SelectContentFiles(files)
+	if err != nil {
+		// Comparison-only callers keep ambiguous metadata visible; downloading uses
+		// SelectContentFiles directly and refuses it before changing anything.
+		return allContentFiles(files)
+	}
+	return selected
+}
+
+func allContentFiles(files []ROMFile) []ROMFile {
 	var out []ROMFile
 	for _, f := range files {
 		category := strings.ToLower(strings.TrimSpace(f.Category))
@@ -237,6 +250,38 @@ func ChangedContent(snapshot []FileSnapshot, files []ROMFile) (download []ROMFil
 		old, ok := oldByID[f.ID]
 		if !ok || old.Category != SnapshotOf(f).Category || snapshotChanged(old, SnapshotOf(f)) {
 			download = append(download, f)
+		}
+	}
+	// A changed volume requires its entire selected RAR cohort. Extracted files
+	// belong to the first volume, so its owned outputs must also be replaced even
+	// when only a later volume changed on the server.
+	changedIDs := map[int]bool{}
+	for _, f := range download {
+		changedIDs[f.ID] = true
+	}
+	changedGroups := map[string]bool{}
+	for _, f := range current {
+		if f.Category != "update" {
+			continue
+		}
+		key, _, part := switchUpdateCohort(f)
+		if part > 0 && changedIDs[f.ID] {
+			changedGroups[key] = true
+		}
+	}
+	if len(changedGroups) > 0 {
+		download = nil
+		for _, f := range current {
+			key, _, part := switchUpdateCohort(f)
+			complete := f.Category == "update" && part > 0 && changedGroups[key]
+			if changedIDs[f.ID] || complete {
+				download = append(download, f)
+			}
+			if complete {
+				if _, exists := oldByID[f.ID]; exists {
+					oldIDs[f.ID] = true
+				}
+			}
 		}
 	}
 	return download, oldIDs

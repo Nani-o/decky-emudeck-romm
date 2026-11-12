@@ -4,7 +4,8 @@ import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 
 import { call } from '../backend'
 import { onOpenGame, refreshLibrary, takePendingGame, useCatalog } from '../catalog'
 import { SETUP_ROUTE, useConnection } from '../connection'
-import { percent, useDownloads } from '../downloads'
+import { useDownloads } from '../downloads'
+import { isTransferring, percent } from '../downloadProgress'
 import type {
   GameFilter,
   GameSort,
@@ -127,14 +128,14 @@ function Shelves({
         </div>
       )}
       {downloads.items.length > 0 && (
-        <Shelf title="Downloading" detail={downloads.held?.message}>
+        <Shelf title="Downloads" detail={downloads.held?.message}>
           {downloads.items.map((d) => (
             <Tile
               key={d.id}
               name={d.name}
               sub={`${d.platformName} · ${downloadLabel(d)}`}
               cover={{ id: d.id, hasCover: true }}
-              progress={d.state === 'downloading' && !d.converting ? percent(d) : undefined}
+              progress={isTransferring(d) ? percent(d) : undefined}
               onOpen={() => onGame(d.id)}
             />
           ))}

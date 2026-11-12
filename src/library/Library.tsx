@@ -52,13 +52,21 @@ import {
 } from '../catalog'
 import { useConnection } from '../connection'
 import { Cover } from '../covers'
-import { type Downloads, percent, useDownloads } from '../downloads'
+import { cancelDownload, type Downloads, percent, useDownloads } from '../downloads'
+import {
+  canCancel,
+  type Download,
+  downloadLabel,
+  downloadTransferText as describeDownloadTransfer,
+  isTransferring,
+} from '../downloadProgress'
+
+export { downloadLabel } from '../downloadProgress'
 import { disabledReason } from '../features'
 import type {
   CollectionRef,
   CollectionSummary,
   DeleteGamesParams,
-  DownloadItem,
   FindGamesStatus,
   Game,
   GameFilter,
@@ -175,15 +183,6 @@ function Problem({ error }: { error: RpcError | null }) {
       <Field label="⚠ Couldn't load" description={error.message} />
     </PanelSectionRow>
   )
-}
-
-/** A download's short state: Queued, Converting, Waiting, its progress, or Failed. */
-export function downloadLabel(d: DownloadItem): string {
-  if (d.state === 'queued') return 'Queued'
-  if (d.state === 'failed') return 'Failed'
-  if (d.converting) return 'Converting'
-  if (d.waitingForGame) return 'Waiting'
-  return `${percent(d)}%`
 }
 
 /**
@@ -1327,8 +1326,13 @@ export async function confirmDownloadAll(
 const downloadName: CSSProperties = { flex: '1 1 auto', minWidth: 0, padding: '8px 12px' }
 const iconButton: CSSProperties = { flex: '0 0 auto', minWidth: 0, width: 40, padding: '8px 0' }
 
-/** What a download row says under its name: progress, the wait for a slot, or why it failed. */
-function DownloadDetail({ d }: { d: DownloadItem }) {
+/** Source transfer size, rather than the size of just the catalog's base ROM. */
+export function downloadTransferText(d: Download): string {
+  return describeDownloadTransfer(d, formatSize)
+}
+
+/** Percentages apply to the transfer; processing phases wait for their own terminal event. */
+function DownloadDetail({ d }: { d: Download }) {
   if (d.state === 'failed') {
     return (
       <PanelSectionRow>
@@ -1336,17 +1340,14 @@ function DownloadDetail({ d }: { d: DownloadItem }) {
       </PanelSectionRow>
     )
   }
-  let text = `${d.platformName} · ${formatSize(d.receivedBytes)} of ${formatSize(d.totalBytes)}`
-  if (d.state === 'queued') text = `${d.platformName} · waiting`
-  if (d.converting) text = `${d.platformName} · converting on RomM`
-  if (d.waitingForGame) text = `${d.platformName} · waiting for game to close`
+  const text = `${d.platformName} · ${downloadTransferText(d)}`
   return (
     <PanelSectionRow>
-      <ProgressBarWithInfo
-        layout="below"
-        nProgress={d.state === 'queued' || d.converting ? 0 : percent(d)}
-        sOperationText={text}
-      />
+      {isTransferring(d) ? (
+        <ProgressBarWithInfo layout="below" nProgress={percent(d)} sOperationText={text} />
+      ) : (
+        <Field label={downloadLabel(d)} description={text} />
+      )}
     </PanelSectionRow>
   )
 }
@@ -1416,8 +1417,21 @@ export function DownloadsSection({ onOpen }: { onOpen: (id: number) => void }) {
               )}
               <DialogButton
                 style={iconButton}
-                aria-label={d.state === 'failed' ? `Dismiss ${d.name}` : `Cancel ${d.name}`}
-                onClick={() => void call('cancel_download', { id: d.id }).catch(() => {})}
+                aria-label={
+                  d.cancelling
+                    ? `Cancelling ${d.name}`
+                    : d.phase === 'install'
+                      ? `Installing ${d.name}`
+                      : d.state === 'failed'
+                        ? `Dismiss ${d.name}`
+                        : `Cancel ${d.name}`
+                }
+                disabled={!canCancel(d)}
+                onClick={() =>
+                  void cancelDownload(d.id).catch((err: unknown) =>
+                    toaster.toast({ title: "Couldn't cancel", body: asRpcError(err).message }),
+                  )
+                }
               >
                 ✕
               </DialogButton>
@@ -1451,7 +1465,7 @@ export interface GameAction {
 export interface GameDetail {
   game: Game | null
   /** The game's download, while it's in the queue. */
-  download?: DownloadItem
+  download?: Download
   /** The game's state, its download's while it has one. */
   state?: GameState
   /** The state as the page says it, with a running download's progress. */
@@ -1547,7 +1561,7 @@ export function useGameDetail(id: number): GameDetail {
   }
   const downloadOff = downloads.problem !== null
   const get = () => void act(() => call('download_game', { id }))
-  const cancel = () => void act(() => call('cancel_download', { id }))
+  const cancel = () => void act(() => cancelDownload(id))
 
   const ownedActions = (game: Game): GameAction[] => [
     {
@@ -1585,7 +1599,15 @@ export function useGameDetail(id: number): GameDetail {
         break
       case 'queued':
       case 'downloading':
-        actions.push({ label: 'Cancel', run: cancel, disabled: busy })
+        actions.push({
+          label: download?.cancelling
+            ? 'Cancelling…'
+            : download?.phase === 'install'
+              ? 'Installing…'
+              : 'Cancel',
+          run: cancel,
+          disabled: busy || !download || !canCancel(download),
+        })
         break
       case 'failed':
         actions.push({ label: 'Retry', run: get, disabled: busy || downloadOff })
@@ -1666,9 +1688,7 @@ export function useGameDetail(id: number): GameDetail {
       search.total > 0
         ? `Searching this Deck: ${search.hashed} of ${search.total} files…`
         : 'Searching this Deck…'
-  } else if (download?.converting) stateText = 'Converting on RomM…'
-  else if (download?.waitingForGame) stateText = 'Waiting for game to close'
-  else if (download?.state === 'downloading') stateText = `Downloading ${percent(download)}%`
+  } else if (download) stateText = downloadLabel(download)
   else if (game?.removed) stateText = `${stateText} · Removed from RomM`
 
   return { game, download, state, stateText, actions, notice, removed, searchNote, error }
@@ -1766,15 +1786,7 @@ export function GameView({ id, onBack }: { id: number; onBack: () => void }) {
           )}
           <BiosSection platformId={game.platformId} nudge />
           {showsSaves(game, state) && <SavesSection id={game.id} />}
-          {download?.state === 'downloading' && !download.converting && (
-            <PanelSectionRow>
-              <ProgressBarWithInfo
-                layout="below"
-                nProgress={percent(download)}
-                sOperationText={`${formatSize(download.receivedBytes)} of ${formatSize(download.totalBytes)}`}
-              />
-            </PanelSectionRow>
-          )}
+          {download && download.state !== 'failed' && <DownloadDetail d={download} />}
           {state === 'failed' && download?.problem && (
             <PanelSectionRow>
               <Field label="⚠ Error" description={download.problem.message} />
@@ -1798,7 +1810,7 @@ export function GameView({ id, onBack }: { id: number; onBack: () => void }) {
             <Field label="Platform">{game.platformName}</Field>
           </PanelSectionRow>
           <PanelSectionRow>
-            <Field label="Size">{formatSize(game.sizeBytes)}</Field>
+            <Field label="Base game size">{formatSize(game.sizeBytes)}</Field>
           </PanelSectionRow>
           {game.regions.length > 0 && (
             <PanelSectionRow>

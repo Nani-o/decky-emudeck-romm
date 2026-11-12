@@ -2,18 +2,20 @@ import { addEventListener, removeEventListener, toaster } from '@decky/api'
 import { useSyncExternalStore } from 'react'
 
 import { BACKEND_STATUS_EVENT, type BackendStatus, call, onEvent } from './backend'
+import { canCancel, type Download } from './downloadProgress'
+
+export { percent } from './downloadProgress'
 import type {
   DeleteEvent,
   DownloadEvent,
   DownloadHoldEvent,
-  DownloadItem,
   OwnershipEvent,
   Error as RpcError,
 } from './rpc/schema.gen'
 
 export interface Downloads {
   /** The queued, running and failed downloads, in queue order. */
-  items: DownloadItem[]
+  items: Download[]
   /** Why downloading is off, null when it works. */
   problem: RpcError | null
   /**
@@ -36,10 +38,17 @@ function publish(next: Downloads) {
   for (const fn of listeners) fn()
 }
 
-async function load() {
+async function load(clearCancellation = false) {
   try {
     const r = await call('list_downloads')
-    publish({ ...current, items: r.downloads, problem: r.problem ?? null, held: r.held ?? null })
+    const items = r.downloads.map((d) => ({
+      ...d,
+      cancelling:
+        !clearCancellation &&
+        d.state !== 'failed' &&
+        current.items.some((was) => was.id === d.id && was.cancelling),
+    }))
+    publish({ ...current, items, problem: r.problem ?? null, held: r.held ?? null })
   } catch (_e) {
     // The backend is down or restarting; the backend status section says so.
   }
@@ -48,7 +57,10 @@ async function load() {
 function apply(e: DownloadEvent) {
   const was = current.items.find((d) => d.id === e.id)
   if (e.state === 'queued' || e.state === 'downloading' || e.state === 'failed') {
-    const items = was ? current.items.map((d) => (d.id === e.id ? e : d)) : [...current.items, e]
+    const next: Download = { ...e, cancelling: e.state !== 'failed' && was?.cancelling }
+    const items = was
+      ? current.items.map((d) => (d.id === e.id ? next : d))
+      : [...current.items, next]
     // Failing moves the game between filters, like ending does.
     const failed = e.state === 'failed' && was?.state !== 'failed'
     publish({ ...current, items, ended: failed ? current.ended + 1 : current.ended })
@@ -120,7 +132,7 @@ export function watchDownloads(): () => void {
   const stopHolds = onEvent('download_hold', applyHold)
   const stopOwnership = onEvent('ownership', applyOwnership)
   const listener = addEventListener<[BackendStatus]>(BACKEND_STATUS_EVENT, (backend) => {
-    if (backend.state === 'ready') void load()
+    if (backend.state === 'ready') void load(true)
   })
   return () => {
     stop()
@@ -142,8 +154,28 @@ export function useDownloads(): Downloads {
   return useSyncExternalStore(subscribe, () => current)
 }
 
-/** Progress of a download as a whole percentage. */
-export function percent(d: { receivedBytes: number; totalBytes: number }): number {
-  if (d.totalBytes <= 0) return 0
-  return Math.min(100, Math.floor((d.receivedBytes / d.totalBytes) * 100))
+/** Request cancellation once; it is complete only when its terminal event removes the item. */
+export async function cancelDownload(id: number): Promise<void> {
+  const item = current.items.find((d) => d.id === id)
+  if (item && !canCancel(item)) return
+  publish({
+    ...current,
+    items: current.items.map((d) => (d.id === id ? { ...d, cancelling: true } : d)),
+  })
+  try {
+    const result = await call('cancel_download', { id })
+    if (!result.cancelled) {
+      publish({
+        ...current,
+        items: current.items.map((d) => (d.id === id ? { ...d, cancelling: false } : d)),
+      })
+      await load()
+    }
+  } catch (err) {
+    publish({
+      ...current,
+      items: current.items.map((d) => (d.id === id ? { ...d, cancelling: false } : d)),
+    })
+    throw err
+  }
 }

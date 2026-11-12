@@ -122,6 +122,10 @@ type Download struct {
 	// WaitingForGame is set while the download, transferred, waits for a running game to close
 	// before it's extracted or zipped.
 	WaitingForGame bool
+	// Phase is download, extract or install while this job runs.
+	Phase string
+	// FileCount is the actual source-file count selected for this transfer.
+	FileCount int
 }
 
 // DownloadListener hears each change to a download. A download that leaves the queue is
@@ -336,7 +340,8 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 	}
 	// A Plugin-owned game downloads again only as its update, which replaces its files.
 	update := false
-	if _, owned, err := d.store.Owned(ctx, id); err != nil || owned {
+	var ownedRecord domain.OwnedROM
+	if rec, owned, err := d.store.Owned(ctx, id); err != nil || owned {
 		if err != nil {
 			return Download{}, err
 		}
@@ -348,6 +353,7 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 			return Download{}, &domain.Error{Kind: domain.KindInvalidInput, Message: "That game is already on this Deck."}
 		}
 		update = true
+		ownedRecord = rec
 	}
 	if path, ok, err := d.occupant(ctx, rom, platform); !update && (err != nil || ok) {
 		if err != nil {
@@ -359,6 +365,38 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 		}
 	}
 
+	plannedBytes, fileCount := rom.SizeBytes, 0
+	if system.Folder == "switch" {
+		// Catalog sizes/counts only describe base files. Resolve the selected patch,
+		// DLC and, for updates, the actual delta before showing a queued transfer.
+		in, signErr := d.conn.activeSignIn()
+		if signErr != nil {
+			return Download{}, signErr
+		}
+		if in == nil {
+			return Download{}, errNotSignedIn
+		}
+		files, readErr := d.dial(in.Server, in.Token).ROMFiles(ctx, id)
+		if readErr != nil {
+			return Download{}, d.conn.observe(*in, readErr)
+		}
+		selected, selectErr := domain.SelectContentFiles(files)
+		if selectErr != nil {
+			return Download{}, selectErr
+		}
+		if update {
+			selected, _ = domain.ChangedContent(ownedRecord.Snapshot, selected)
+		}
+		plannedBytes = 0
+		fileCount = len(selected)
+		for _, f := range selected {
+			if f.SizeBytes < 0 || plannedBytes > (1<<63-1)-f.SizeBytes {
+				return Download{}, &domain.Error{Kind: domain.KindCantDownload, Message: "RomM reported an invalid Switch file size."}
+			}
+			plannedBytes += f.SizeBytes
+		}
+	}
+
 	d.mu.Lock()
 	j := d.find(id)
 	if j != nil && j.State != domain.StateFailed {
@@ -366,12 +404,14 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 		return j.Download, nil
 	}
 	need := roomFor(system, rom)
-	if update && system.Folder == "switch" {
-		// The exact Switch delta comes from the server's file manifest and is checked when this job
-		// starts. RomM's catalog size covers the base game, which may already occupy several GB.
-		need = 0
+	if system.Folder == "switch" {
+		need = plannedBytes
 	}
-	if j != nil && !(update && system.Folder == "switch") {
+	if j != nil && system.Folder == "switch" {
+		if j.Total == plannedBytes {
+			need = max(plannedBytes-j.Received, 0)
+		}
+	} else if j != nil {
 		// A retry resumes, so only what's left of it needs room.
 		need += j.Total - j.Received - rom.SizeBytes
 	}
@@ -384,21 +424,19 @@ func (d *Downloads) Queue(ctx context.Context, id int) (Download, error) {
 	d.mu.Lock()
 	j = d.find(id)
 	added := j == nil
-	totalBytes := rom.SizeBytes
-	if update && system.Folder == "switch" {
-		totalBytes = 0 // the actual delta is known only after reading the file manifest
-	}
+	totalBytes := plannedBytes
 	switch {
 	case j != nil && j.State != domain.StateFailed:
 		d.mu.Unlock()
 		return j.Download, nil
 	case j != nil:
-		j.State, j.Problem = domain.StateQueued, nil
+		j.State, j.Problem, j.Phase = domain.StateQueued, nil, ""
+		j.Total, j.FileCount = totalBytes, fileCount
 		d.log.Info("download retried", "rom_id", id)
 	default:
 		j = &job{
 			ROMID: id, PlatformID: rom.PlatformID, PlatformName: platform.Name, Name: rom.Name,
-			State: domain.StateQueued, Total: totalBytes, update: update}
+			State: domain.StateQueued, Total: totalBytes, FileCount: fileCount, update: update}
 		d.jobs = append(d.jobs, j)
 		d.log.Info("download queued", "rom_id", id, "name", rom.Name, "update", update)
 	}
@@ -825,7 +863,10 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	game := domain.GameFiles(files)
 	manifest := game
 	if system.Folder == "switch" {
-		manifest = domain.ContentFiles(files)
+		manifest, err = domain.SelectContentFiles(files)
+		if err != nil {
+			return err
+		}
 	}
 	name := rom.FileName
 	if name == "" {
@@ -883,7 +924,8 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 				return err
 			}
 		}
-		downloadFiles, touchedIDs := domain.ChangedContent(oldRecord.Snapshot, manifest)
+		var touchedIDs map[int]bool
+		downloadFiles, touchedIDs = domain.ChangedContent(oldRecord.Snapshot, manifest)
 		if hasLegacyBase && baseChanged {
 			selectedBase := map[int]bool{}
 			for _, f := range downloadFiles {
@@ -1021,6 +1063,7 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	}
 	d.mu.Lock()
 	j.State, j.Total = domain.StateDownloading, total
+	j.Phase, j.FileCount = "download", len(layout.Files)
 	started := j.Download
 	d.mu.Unlock()
 	d.onChange(started)
@@ -1057,6 +1100,12 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 		sums[i], paths[i], done = sum, path, done+f.File.SizeBytes
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if layout.Zip || slices.ContainsFunc(layout.Files, func(f domain.PlannedFile) bool { return domain.IsArchive(f.File.Name) }) {
+		d.setPhase(j, "extract")
+	}
 	var staged []stagedFile
 	if system.Folder == "switch" {
 		legacyLoosePath := ""
@@ -1093,6 +1142,10 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 			return err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	d.setPhase(j, "install")
 	place := d.place
 	var carry func(context.Context)
 	if j.update {
@@ -1190,6 +1243,14 @@ func (d *Downloads) convert(ctx context.Context, server DownloadServer, j *job, 
 	return served, true, nil
 }
 
+func (d *Downloads) setPhase(j *job, phase string) {
+	d.mu.Lock()
+	j.Phase = phase
+	update := j.Download
+	d.mu.Unlock()
+	d.onChange(update)
+}
+
 func (d *Downloads) setConverting(j *job, on bool) {
 	d.mu.Lock()
 	j.Converting = on
@@ -1260,8 +1321,28 @@ func (d *Downloads) stageSwitchContent(ctx context.Context, j *job, system domai
 			rarIDs[f.ID] = true
 		}
 	}
+	updateVolumes, otherVolumes, err := updateRARVolumes(layout.Files)
+	if err != nil {
+		return nil, err
+	}
 	var out []stagedFile
 	for i, f := range layout.Files {
+		if otherVolumes[f.File.ID] {
+			continue
+		}
+		if indices, ok := updateVolumes[f.File.ID]; ok {
+			volumes := make([]string, 0, len(indices))
+			for _, index := range indices {
+				volumes = append(volumes, paths[index])
+			}
+			items, err := d.unpack(ctx, j, system, paths[i], sums[i], dir, f.File.ID, volumes...)
+			if err != nil {
+				return nil, err
+			}
+			out = appendSwitchFiles(out, items, filepath.Dir(f.Rel), f.File.ID)
+			continue
+		}
+
 		if rarIDs[f.File.ID] {
 			if f.File.ID != rarFirstID {
 				continue

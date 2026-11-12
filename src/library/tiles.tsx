@@ -2,7 +2,8 @@ import { Focusable } from '@decky/ui'
 import type { CSSProperties, ReactNode } from 'react'
 
 import { Cover } from '../covers'
-import { percent, useDownloads } from '../downloads'
+import { useDownloads } from '../downloads'
+import { isTransferring, percent } from '../downloadProgress'
 import type { GameSummary } from '../rpc/schema.gen'
 import { stateLabel } from './Library'
 
@@ -156,7 +157,7 @@ export function GameTile({
       name={game.name}
       sub={parts.filter(Boolean).join(' · ') || undefined}
       cover={game}
-      progress={d?.state === 'downloading' && !d.converting ? percent(d) : undefined}
+      progress={d && isTransferring(d) ? percent(d) : undefined}
       onOpen={onOpen}
       onFocus={onFocus}
     />

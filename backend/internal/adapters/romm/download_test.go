@@ -350,3 +350,16 @@ func TestDispositionName(t *testing.T) {
 		}
 	}
 }
+
+func TestPackageVersionWireFormats(t *testing.T) {
+	for raw, want := range map[string]string{`"65536"`: "65536", `65536`: "65536", `null`: "", `"4.0.1"`: "4.0.1", `true`: "invalid"} {
+		if got := rawPackageVersion(json.RawMessage(raw)); got != want {
+			t.Fatalf("raw %s = %q, want %q", raw, got, want)
+		}
+	}
+	title := "0100152000022800"
+	files := (romWithFiles{Files: []wireFile{{ID: 1, TitleID: &title, TitleVersion: json.RawMessage(`1507328`)}}}).files()
+	if len(files) != 1 || files[0].TitleID != "0100152000022800" || files[0].TitleVersion != "1507328" {
+		t.Fatalf("metadata lost %+v", files)
+	}
+}

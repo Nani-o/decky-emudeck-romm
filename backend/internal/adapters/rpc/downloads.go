@@ -260,6 +260,8 @@ func toWireDownload(d app.Download) schema.DownloadItem {
 		TotalBytes:     d.Total,
 		Converting:     d.Converting,
 		WaitingForGame: d.WaitingForGame,
+		Phase:          d.Phase,
+		FileCount:      d.FileCount,
 	}
 	if d.Problem != nil {
 		item.Problem = problemOf(d.Problem)

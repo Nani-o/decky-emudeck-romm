@@ -268,3 +268,41 @@ func openRAR(path string, volumes []string) ([]archiveMember, func() error, erro
 	}
 	return members, closeAll, nil
 }
+
+// updateRARVolumes groups numbered patch archives without mixing their volumes
+// with base-game or other downloaded content. Only this job's manifest is used.
+func updateRARVolumes(files []domain.PlannedFile) (map[int][]int, map[int]bool, error) {
+	pattern := regexp.MustCompile(`(?i)^(.*)\.part([0-9]+)\.rar$`)
+	groups := map[string][]int{}
+	for i, f := range files {
+		if f.File.Category != "update" {
+			continue
+		}
+		match := pattern.FindStringSubmatch(f.File.Name)
+		if match != nil {
+			key := filepath.Dir(f.File.Path) + "/" + match[1]
+			groups[key] = append(groups[key], i)
+		}
+	}
+	firsts, other := map[int][]int{}, map[int]bool{}
+	for _, indices := range groups {
+		group := make([]domain.ROMFile, 0, len(indices))
+		for _, i := range indices {
+			group = append(group, files[i].File)
+		}
+		first, err := multipartRAR(group)
+		if err != nil {
+			return nil, nil, err
+		}
+		if first < 0 {
+			first = 0
+		}
+		firsts[files[indices[first]].File.ID] = indices
+		for n, i := range indices {
+			if n != first {
+				other[files[i].File.ID] = true
+			}
+		}
+	}
+	return firsts, other, nil
+}
