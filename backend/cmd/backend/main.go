@@ -20,6 +20,7 @@ import (
 	"github.com/chenasraf/decky-emudeck-romm/backend/internal/adapters/romm"
 	"github.com/chenasraf/decky-emudeck-romm/backend/internal/adapters/rpc"
 	"github.com/chenasraf/decky-emudeck-romm/backend/internal/adapters/rpc/schema"
+	"github.com/chenasraf/decky-emudeck-romm/backend/internal/adapters/rpcs3"
 	"github.com/chenasraf/decky-emudeck-romm/backend/internal/adapters/settings"
 	statedb "github.com/chenasraf/decky-emudeck-romm/backend/internal/adapters/state"
 	"github.com/chenasraf/decky-emudeck-romm/backend/internal/adapters/system"
@@ -173,6 +174,8 @@ func run(log *slog.Logger, level *slog.LevelVar) error {
 	media := app.NewMedia(coverArt, conn, mediaDial, store, log.With("component", "media"))
 	downloads := app.NewDownloads(ctx, cache, install, conn, downloadDial, ownership, stateErr, system.FreeBytes, store,
 		games, media, store.DownloadConcurrency(), listeners, log.With("component", "downloads"))
+
+	downloads.InstallPS3PackagesWith(rpcs3.New(rpcs3.Config{HomeDir: userHome(log), IntentDir: filepath.Join(runtimeDir, "ps3-installs")}))
 
 	sendCatalog := rpc.CatalogEvents(srv)
 	catalog := app.NewCatalog(ctx, cache, downloads, conn, catalogDial, func(s app.CatalogStatus) {

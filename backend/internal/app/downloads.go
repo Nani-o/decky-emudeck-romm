@@ -165,6 +165,7 @@ type Downloads struct {
 	media *Media
 	// saves sets aside the saves of games deleted with them; nil until KeepSavesWith.
 	saves    *Saves
+	ps3      PS3PackageInstaller
 	limit    int
 	onChange DownloadListener
 	onDelete DeleteListener
@@ -213,7 +214,8 @@ type job struct {
 	// partial is the Server's file whose bytes are in staging.
 	partial domain.FileSnapshot
 	// update is set when the download replaces the files of a Plugin-owned game with its update.
-	update bool
+	update        bool
+	retainStaging bool
 }
 
 // NewDownloads returns the download queue, running up to limit downloads at once. A nil store
@@ -869,7 +871,7 @@ func (d *Downloads) run(ctx context.Context, j *job) {
 	j.cancel()
 	j.cancel = nil
 	d.running--
-	if err != nil && !errors.Is(err, context.Canceled) {
+	if err != nil && (!errors.Is(err, context.Canceled) || j.retainStaging) {
 		j.State, j.Problem = domain.StateFailed, err
 	} else {
 		d.remove(j)
@@ -882,7 +884,7 @@ func (d *Downloads) run(ctx context.Context, j *job) {
 		d.discard(j.ROMID)
 		ended.State = domain.StateInstalled
 		d.log.Info("download installed", "rom_id", j.ROMID, "bytes", ended.Received, "duration", d.now().Sub(start).Round(time.Millisecond))
-	case errors.Is(err, context.Canceled):
+	case errors.Is(err, context.Canceled) && !j.retainStaging:
 		d.discard(j.ROMID)
 		ended.State = domain.StateOnRomM
 		if j.update {
@@ -1235,6 +1237,16 @@ func (d *Downloads) download(ctx context.Context, j *job) error {
 	}
 	if err != nil {
 		return err
+	}
+	if system.Folder == "ps3" {
+		var shortcut string
+		staged, shortcut, err = d.stagePS3Package(ctx, j, rom, staged, staging, dir, old)
+		if err != nil {
+			return err
+		}
+		if shortcut != "" {
+			layout.Root = shortcut
+		}
 	}
 	if legacyLoose != nil && !baseChanged {
 		base, err := stageLegacySwitchBase(staging, *legacyLoose, layout.Root)

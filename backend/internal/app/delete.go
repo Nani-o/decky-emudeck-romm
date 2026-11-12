@@ -167,12 +167,27 @@ func (d *Downloads) deleteGame(ctx context.Context, id int, withSaves bool) erro
 	if err != nil || !ok {
 		return err
 	}
+	native := nativePS3Shortcut(rec)
+	remover, canRemove := d.ps3.(PS3PackageRemover)
+	nativeOwned := false
+	if native && canRemove {
+		nativeOwned, err = remover.CheckRemoval(ctx, id)
+		if err != nil {
+			return err
+		}
+	}
+	if native && !nativeOwned {
+		return fmt.Errorf("PS3 native installation ownership is unavailable; game retained for review")
+	}
 	for _, f := range rec.Files {
 		same, err := unchanged(f)
 		if err != nil {
 			return err
 		}
 		if !same {
+			if nativeOwned {
+				return &domain.Error{Kind: domain.KindChangedOnDisk, Message: "PS3 launcher changed; native installation and ownership retained for review."}
+			}
 			if err := d.store.DeleteOwned(ctx, id); err != nil {
 				return err
 			}
@@ -187,6 +202,11 @@ func (d *Downloads) deleteGame(ctx context.Context, id int, withSaves bool) erro
 	var setAside func() error
 	if withSaves && d.saves != nil {
 		if setAside, err = d.saves.setAside(ctx, id); err != nil {
+			return err
+		}
+	}
+	if nativeOwned {
+		if _, err := remover.Remove(ctx, id); err != nil {
 			return err
 		}
 	}

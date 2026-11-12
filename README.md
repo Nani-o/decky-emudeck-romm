@@ -58,7 +58,7 @@ settings and game database.
 
 For a source build, follow [DEVELOPMENT.md](DEVELOPMENT.md) and package this checkout with
 `make package`. Installing an upstream release alone does not install this fork's additions. The
-default RPC protocol is unchanged; the backend version is `0.5.0-nani.3`.
+default RPC protocol is unchanged; the backend version is `0.5.0-nani.4`.
 
 Switch downloads select the latest applicable update by its numeric package version and title ID,
 while keeping all DLC. Older updates remain available on RomM and are omitted from the Deck
@@ -77,6 +77,19 @@ option enabled. Save synchronization uses an explicit Eden NAND/profile/title bi
 qualified title binding keep local saves; they do not acquire a guessed save mapping. Invalid
 bindings and sync conflicts are reported separately. These additions require runtime validation
 before being treated as supported on a particular device.
+
+PS3 base-game bundles containing one retail PKG and its matching RAP are installed through the
+existing RPCS3 AppImage. Firmware and the active user must already be configured, and RPCS3 must
+be closed. Installation verifies the native title before publishing an ES-DE desktop shortcut.
+After ownership is saved, the downloaded archive and extracted PKG are removed from the Deck;
+the original stays on RomM. Failed installs retain private staging for diagnosis.
+
+Deleting a managed package removes its recorded native title, its own license and the shortcut,
+while preserving saves, trophies, firmware and other titles. Removal stops if the pinned native
+installation has changed or contains unrecorded files. An interrupted removal can be retried,
+and a removed package can be installed again. Legacy native installs are not automatically
+adopted. Disc-directory games retain their normal launcher; separate PS3 updates/DLC and
+multi-package bundles are not supported by this installer.
 
 The upstream [getting started guide](docs/getting-started.md) explains the original setup and
 sign-in flow; its release download links install the stock upstream plugin.
